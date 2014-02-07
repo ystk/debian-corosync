@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2002-2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2009 Red Hat, Inc.
+ * Copyright (c) 2006-2010 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -73,15 +73,17 @@
 #define JOIN_TIMEOUT				50
 #define MERGE_TIMEOUT				200
 #define DOWNCHECK_TIMEOUT			1000
-#define FAIL_TO_RECV_CONST			50
+#define FAIL_TO_RECV_CONST			2500
 #define	SEQNO_UNCHANGED_CONST			30
 #define MINIMUM_TIMEOUT				(int)(1000/HZ)*3
 #define MAX_NETWORK_DELAY			50
 #define WINDOW_SIZE				50
 #define MAX_MESSAGES				17
+#define MISS_COUNT_CONST			5
 #define RRP_PROBLEM_COUNT_TIMEOUT		2000
 #define RRP_PROBLEM_COUNT_THRESHOLD_DEFAULT	10
-#define RRP_PROBLEM_COUNT_THRESHOLD_MIN		5
+#define RRP_PROBLEM_COUNT_THRESHOLD_MIN		2
+#define RRP_AUTORECOVERY_CHECK_TIMEOUT		1000
 
 static char error_string_response[512];
 static struct objdb_iface_ver0 *global_objdb;
@@ -211,14 +213,20 @@ static void totem_volatile_config_read (
 
 	objdb_get_int (objdb,object_totem_handle, "rrp_problem_count_threshold", &totem_config->rrp_problem_count_threshold);
 
+	objdb_get_int (objdb,object_totem_handle, "rrp_problem_count_mcast_threshold", &totem_config->rrp_problem_count_mcast_threshold);
+
+	objdb_get_int (objdb,object_totem_handle, "rrp_autorecovery_check_timeout", &totem_config->rrp_autorecovery_check_timeout);
+
 	objdb_get_int (objdb,object_totem_handle, "heartbeat_failures_allowed", &totem_config->heartbeat_failures_allowed);
 
 	objdb_get_int (objdb,object_totem_handle, "max_network_delay", &totem_config->max_network_delay);
 
 	objdb_get_int (objdb,object_totem_handle, "window_size", &totem_config->window_size);
-	objdb_get_string (objdb, object_totem_handle, "vsftype", &totem_config->vsf_type);
+	(void)objdb_get_string (objdb, object_totem_handle, "vsftype", &totem_config->vsf_type);
 
 	objdb_get_int (objdb,object_totem_handle, "max_messages", &totem_config->max_messages);
+
+	objdb_get_int (objdb,object_totem_handle, "miss_count_const", &totem_config->miss_count_const);
 }
 
 
@@ -270,10 +278,13 @@ extern int totem_config_read (
 	int res = 0;
 	hdb_handle_t object_totem_handle;
 	hdb_handle_t object_interface_handle;
+	hdb_handle_t object_member_handle;
 	const char *str;
 	unsigned int ringnumber = 0;
 	hdb_handle_t object_find_interface_handle;
+	hdb_handle_t object_find_member_handle;
 	const char *transport_type;
+	int member_count = 0;
 
 	res = totem_handle_find (objdb, &object_totem_handle);
 	if (res == -1) {
@@ -349,6 +360,8 @@ printf ("couldn't find totem handle\n");
 		object_find_interface_handle,
 		&object_interface_handle) == 0) {
 
+		member_count = 0;
+
 		objdb_get_int (objdb, object_interface_handle, "ringnumber", &ringnumber);
 
 		/*
@@ -365,8 +378,6 @@ printf ("couldn't find totem handle\n");
 					&totem_config->interfaces[ringnumber].mcast_addr,
 					"255.255.255.255", 0);
 			}
-
-
 		}
 
 		/*
@@ -384,6 +395,31 @@ printf ("couldn't find totem handle\n");
 			res = totemip_parse (&totem_config->interfaces[ringnumber].bindnet, str,
 					     totem_config->interfaces[ringnumber].mcast_addr.family);
 		}
+
+		/*
+		 * Get the TTL
+		 */
+		totem_config->interfaces[ringnumber].ttl = 1;
+		if (!objdb_get_string (objdb, object_interface_handle, "ttl", &str)) {
+			totem_config->interfaces[ringnumber].ttl = atoi (str);
+		}
+
+		objdb->object_find_create (
+			object_interface_handle,
+			"member",
+			strlen ("member"),
+			&object_find_member_handle);
+
+		while (objdb->object_find_next (
+			object_find_member_handle,
+			&object_member_handle) == 0) {
+
+			if (!objdb_get_string (objdb, object_member_handle, "memberaddr", &str)) {
+				res = totemip_parse (&totem_config->interfaces[ringnumber].member_list[member_count++], str, 0);
+			}
+		
+		}
+		totem_config->interfaces[ringnumber].member_count = member_count;
 		totem_config->interface_count++;
 	}
 
@@ -391,11 +427,17 @@ printf ("couldn't find totem handle\n");
 
 	add_totem_config_notification(objdb, totem_config, object_totem_handle);
 
-	totem_config->transport_number = 0;
-	objdb_get_string (objdb, object_totem_handle, "transport", &transport_type);
+	totem_config->transport_number = TOTEM_TRANSPORT_UDP;
+	(void)objdb_get_string (objdb, object_totem_handle, "transport", &transport_type);
+
+	if (transport_type) {
+		if (strcmp (transport_type, "udpu") == 0) {
+			totem_config->transport_number = TOTEM_TRANSPORT_UDPU;
+		}
+	}
 	if (transport_type) {
 		if (strcmp (transport_type, "iba") == 0) {
-			totem_config->transport_number = 1;
+			totem_config->transport_number = TOTEM_TRANSPORT_RDMA;
 		}
 	}
 
@@ -421,13 +463,29 @@ int totem_config_validate (
 		/*
 		 * Some error checking of parsed data to make sure its valid
 		 */
-		if ((int *)&totem_config->interfaces[i].mcast_addr.addr == 0) {
+
+		struct totem_ip_address null_addr;
+		memset (&null_addr, 0, sizeof (struct totem_ip_address));
+
+		if ((totem_config->transport_number == 0) &&
+			memcmp (&totem_config->interfaces[i].mcast_addr, &null_addr,
+				sizeof (struct totem_ip_address)) == 0) {
 			error_reason = "No multicast address specified";
 			goto parse_error;
 		}
 
 		if (totem_config->interfaces[i].ip_port == 0) {
 			error_reason = "No multicast port specified";
+			goto parse_error;
+		}
+
+		if (totem_config->interfaces[i].ttl > 255) {
+			error_reason = "Invalid TTL (should be 0..255)";
+			goto parse_error;
+		}
+		if (totem_config->transport_number != TOTEM_TRANSPORT_UDP &&
+		    totem_config->interfaces[i].ttl != 1) {
+			error_reason = "Can only set ttl on multicast transport types";
 			goto parse_error;
 		}
 
@@ -438,7 +496,7 @@ int totem_config_validate (
 			goto parse_error;
 		}
 
-		if (totem_config->broadcast_use == 0) {
+		if (totem_config->broadcast_use == 0 && totem_config->transport_number == 0) {
 			if (totem_config->interfaces[i].mcast_addr.family != totem_config->interfaces[i].bindnet.family) {
 				error_reason = "Multicast address family does not match bind address family";
 				goto parse_error;
@@ -446,6 +504,10 @@ int totem_config_validate (
 
 			if (totem_config->interfaces[i].mcast_addr.family != totem_config->interfaces[i].bindnet.family) {
 				error_reason =  "Not all bind address belong to the same IP family";
+				goto parse_error;
+			}
+			if (totemip_is_mcast (&totem_config->interfaces[i].mcast_addr) != 0) {
+				error_reason = "mcastaddr is not a correct multicast address.";
 				goto parse_error;
 			}
 		}
@@ -500,6 +562,10 @@ int totem_config_validate (
 
 	if (totem_config->max_messages == 0) {
 		totem_config->max_messages = MAX_MESSAGES;
+	}
+
+	if (totem_config->miss_count_const == 0) {
+		totem_config->miss_count_const = MISS_COUNT_CONST;
 	}
 
 	if (totem_config->token_timeout < MINIMUM_TIMEOUT) {
@@ -559,13 +625,6 @@ int totem_config_validate (
 		goto parse_error;
 	}
 
-	if (totem_config->consensus_timeout < 1.2 * totem_config->token_timeout) {
-		snprintf (local_error_reason, sizeof(local_error_reason),
-			"The consensus timeout parameter (%d ms) must be atleast 1.2 * token (%d ms).",
-			totem_config->consensus_timeout, (int) ((float)1.2 * totem_config->token_timeout));
-		goto parse_error;
-	}
-
 	if (totem_config->merge_timeout == 0) {
 		totem_config->merge_timeout = MERGE_TIMEOUT;
 	}
@@ -610,10 +669,19 @@ int totem_config_validate (
 	if (totem_config->rrp_problem_count_threshold == 0) {
 		totem_config->rrp_problem_count_threshold = RRP_PROBLEM_COUNT_THRESHOLD_DEFAULT;
 	}
+	if (totem_config->rrp_problem_count_mcast_threshold == 0) {
+		totem_config->rrp_problem_count_mcast_threshold = totem_config->rrp_problem_count_threshold * 10;
+	}
 	if (totem_config->rrp_problem_count_threshold < RRP_PROBLEM_COUNT_THRESHOLD_MIN) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The RRP problem count threshold (%d problem count) may not be less then (%d problem count).",
 			totem_config->rrp_problem_count_threshold, RRP_PROBLEM_COUNT_THRESHOLD_MIN);
+		goto parse_error;
+	}
+	if (totem_config->rrp_problem_count_mcast_threshold < RRP_PROBLEM_COUNT_THRESHOLD_MIN) {
+		snprintf (local_error_reason, sizeof(local_error_reason),
+			"The RRP multicast problem count threshold (%d problem count) may not be less then (%d problem count).",
+			totem_config->rrp_problem_count_mcast_threshold, RRP_PROBLEM_COUNT_THRESHOLD_MIN);
 		goto parse_error;
 	}
 	if (totem_config->rrp_token_expired_timeout == 0) {
@@ -626,6 +694,10 @@ int totem_config_validate (
 			"The RRP token expired timeout parameter (%d ms) may not be less then (%d ms).",
 			totem_config->rrp_token_expired_timeout, MINIMUM_TIMEOUT);
 		goto parse_error;
+	}
+
+	if (totem_config->rrp_autorecovery_check_timeout == 0) {
+		totem_config->rrp_autorecovery_check_timeout = RRP_AUTORECOVERY_CHECK_TIMEOUT;
 	}
 
 	if (strcmp (totem_config->rrp_mode, "none") == 0) {
@@ -691,13 +763,14 @@ static int read_keyfile (
 	ssize_t expected_key_len = sizeof (totem_config->private_key);
 	int saved_errno;
 	char error_str[100];
+	const char *error_ptr;
 
 	fd = open (key_location, O_RDONLY);
 	if (fd == -1) {
-		strerror_r (errno, error_str, 100);
+		LOGSYS_STRERROR_R (error_ptr, errno, error_str, sizeof(error_str));
 		snprintf (error_string_response, sizeof(error_string_response),
 			"Could not open %s: %s\n",
-			 key_location, error_str);
+			 key_location, error_ptr);
 		goto parse_error;
 	}
 
@@ -706,10 +779,10 @@ static int read_keyfile (
 	close (fd);
 
 	if (res == -1) {
-		strerror_r (errno, error_str, 100);
+		LOGSYS_STRERROR_R (error_ptr, saved_errno, error_str, sizeof(error_str));
 		snprintf (error_string_response, sizeof(error_string_response),
 			"Could not read %s: %s\n",
-			 key_location, error_str);
+			 key_location, error_ptr);
 		goto parse_error;
 	}
 
@@ -790,8 +863,8 @@ int totem_config_keyread (
 
 	return (0);
 
-	*error_string = error_string_response;
 key_error:
+	*error_string = error_string_response;
 	return (-1);
 
 }
@@ -818,6 +891,9 @@ static void totem_objdb_reload_notify(objdb_reload_notify_type_t type, int flush
 	struct totem_config *totem_config = priv_data_pt;
 	hdb_handle_t totem_object_handle;
 
+	if (totem_config == NULL)
+	        return;
+
 	/*
 	 * A new totem {} key might exist, cancel the
 	 * existing notification at the start of reload,
@@ -831,7 +907,7 @@ static void totem_objdb_reload_notify(objdb_reload_notify_type_t type, int flush
 			NULL,
 			NULL,
 			NULL,
-			NULL);
+			totem_config);
 	}
 
 	if (type == OBJDB_RELOAD_NOTIFY_END ||
@@ -840,8 +916,14 @@ static void totem_objdb_reload_notify(objdb_reload_notify_type_t type, int flush
 
 		if (!totem_handle_find(global_objdb,
 				      &totem_object_handle)) {
-			add_totem_config_notification(global_objdb, totem_config, totem_object_handle);
 
+		        global_objdb->object_track_start(totem_object_handle,
+						  1,
+						  totem_key_change_notify,
+						  NULL, // object_create_notify,
+						  NULL, // object_destroy_notify,
+						  NULL, // object_reload_notify
+						  totem_config); // priv_data
 			/*
 			 * Reload the configuration
 			 */

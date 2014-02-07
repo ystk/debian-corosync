@@ -4,7 +4,10 @@
 # bootstrap / init
 AC_PREREQ([2.61])
 
-AC_INIT([corosync], [1.2.1], [openais@lists.osdl.org])
+AC_INIT([corosync],
+	m4_esyscmd([build-aux/git-version-gen .tarball-version]),
+	[openais@lists.osdl.org])
+
 AM_INIT_AUTOMAKE([-Wno-portability])
 
 AC_CONFIG_SRCDIR([lib/coroipcc.c])
@@ -13,11 +16,6 @@ AC_CONFIG_HEADER([include/corosync/config.h include/corosync/cs_config.h])
 AC_CANONICAL_HOST
 
 AC_LANG([C])
-
-# Define SVN revision
-AC_DEFINE([SVN_REVISION],["m4_esyscmd([svnversion >/dev/null 2>&1 && \
-				       svnversion -n || \
-				       echo -n exported])"], [SVN revision])
 
 dnl Fix default variables - "prefix" variable if not specified
 if test "$prefix" = "NONE"; then
@@ -114,8 +112,7 @@ AC_FUNC_VPRINTF
 AC_CHECK_FUNCS([alarm alphasort atexit bzero dup2 endgrent endpwent fcntl \
 		getcwd getpeerucred getpeereid gettimeofday inet_ntoa memmove \
 		memset mkdir scandir select socket strcasecmp strchr strdup \
-		strerror strrchr strspn strstr pthread_spin_lock \
-		pthread_spin_unlock pthread_setschedparam \
+		strerror strrchr strspn strstr pthread_setschedparam \
 		sched_get_priority_max sched_setscheduler])
 
 AC_CONFIG_FILES([Makefile
@@ -128,9 +125,39 @@ AC_CONFIG_FILES([Makefile
 		 pkgconfig/Makefile
 		 services/Makefile
 		 test/Makefile
-		 tools/Makefile])
+		 tools/Makefile
+		 conf/Makefile])
 
 ### Local business
+
+dnl ===============================================
+dnl Functions / global M4 variables
+dnl ===============================================
+dnl Global list of LIB names
+m4_define([local_soname_list], [])dnl
+
+dnl Upcase parameter
+m4_define([local_upcase], [translit([$*], [a-z], [A-Z])])dnl
+
+dnl M4 macro for include lib/lib$1.soname and subst that
+m4_define([LIB_SONAME_IMPORT],[dnl
+m4_define([local_libname], local_upcase($1)[_SONAME])dnl
+m4_define([local_soname], translit(m4_sinclude(lib/lib$1.verso), [
+], []))dnl
+local_libname="local_soname"dnl
+m4_define([local_soname_list], m4_defn([local_soname_list])[,]local_libname[,]local_upcase($1))dnl
+AC_SUBST(local_libname)dnl
+])dnl
+
+dnl M4 macro for print padspaces (used in LIB_MSG_RESULT). It takes 2 arguments, length of string to pad and desired
+dnl (padded) length
+m4_define([m4_printpadspace],[ifelse(m4_eval([$2 - $1 < 1]),[1],,[ ][m4_printpadspace([$1],m4_eval([$2 - 1]))])])dnl
+
+dnl Show AC_MSG_RESULT for specific libraries
+m4_define([LIB_MSG_RESULT], [ifelse([$#], [1],  ,[dnl
+AC_MSG_RESULT([  $2 Library SONAME m4_printpadspace(len($2),8) = ${$1}])
+LIB_MSG_RESULT(m4_shift(m4_shift($@)))dnl
+])])dnl
 
 # ===============================================
 # Helpers
@@ -165,14 +192,21 @@ PACKAGE_FEATURES=""
 LINT_FLAGS="-weak -unrecog +posixlib +ignoresigns -fcnuse \
 	-badflag -D__gnuc_va_list=va_list -D__attribute\(x\)="
 
-# libraries SONAME
+# default libraries SONAME
 SOMAJOR="4"
 SOMINOR="0"
 SOMICRO="0"
 SONAME="${SOMAJOR}.${SOMINOR}.${SOMICRO}"
-# Special for libcpg
-CPG_SOMICRO="1"
-CPG_SONAME="${SOMAJOR}.${SOMINOR}.${CPG_SOMICRO}"
+
+# specific libraries SONAME
+LIB_SONAME_IMPORT([cfg])
+LIB_SONAME_IMPORT([confdb])
+LIB_SONAME_IMPORT([cpg])
+LIB_SONAME_IMPORT([evs])
+LIB_SONAME_IMPORT([pload])
+LIB_SONAME_IMPORT([quorum])
+LIB_SONAME_IMPORT([sam])
+LIB_SONAME_IMPORT([votequorum])
 
 # local options
 AC_ARG_ENABLE([ansi],
@@ -187,6 +221,10 @@ AC_ARG_ENABLE([debug],
 	[ --enable-debug          : enable debug build. ],
 	[ default="no" ])
 
+AC_ARG_ENABLE([user-flags],
+	[  --enable-user-flags     : rely on user environment. ],
+	[ default="no" ])
+
 AC_ARG_ENABLE([coverage],
 	[  --enable-coverage       : coverage analysis of the codebase. ],
 	[ default="no" ])
@@ -198,6 +236,14 @@ AC_ARG_ENABLE([small-memory-footprint],
 AC_ARG_ENABLE([nss],
 	[  --enable-nss            : Network Security Services encryption. ],,
 	[ enable_nss="yes" ])
+
+AC_ARG_ENABLE([dbus],
+	[  --enable-dbus                    : dbus events. ],,
+	[ enable_dbus="no" ])
+
+AC_ARG_ENABLE([testagents],
+	[  --enable-testagents             : Install Test Agents. ],,
+	[ default="no" ])
 
 AC_ARG_ENABLE([rdma],
 	[  --enable-rdma           : Infiniband RDMA transport support ],,
@@ -219,6 +265,10 @@ AC_ARG_WITH([socket-dir],
 	[ SOCKETDIR="$withval" ],
 	[ SOCKETDIR="$localstatedir/run" ])
 
+AC_ARG_ENABLE([snmp],
+       [  --enable-snmp           : SNMP protocol support ],
+       [ default="no" ])
+
 # OS detection
 # THIS SECTION MUST DIE!
 CP=cp
@@ -228,7 +278,7 @@ case "$host_os" in
 		AC_DEFINE_UNQUOTED([COROSYNC_LINUX], [1],
 				   [Compiling for Linux platform])
 		OS_CFLAGS=""
-		OS_CPPFLAGS=""
+		OS_CPPFLAGS="-D_GNU_SOURCE"
 		OS_LDFLAGS=""
 		OS_DYFLAGS="-rdynamic"
 		DARWIN_OPTS=""
@@ -321,12 +371,106 @@ if test "x${enable_nss}" = xyes; then
 	PACKAGE_FEATURES="$PACKAGE_FEATURES nss"
 fi
 
+# Look for dbus-1
+if test "x${enable_dbus}" = xyes; then
+	PKG_CHECK_MODULES([DBUS],[dbus-1])
+	AC_DEFINE_UNQUOTED([HAVE_DBUS], 1, [have dbus])
+	PACKAGE_FEATURES="$PACKAGE_FEATURES dbus"
+fi
+
+if test "x${enable_testagents}" = xyes; then
+	AC_DEFINE_UNQUOTED([HAVE_TESTAGENTS], 1, [have testagents])
+	PACKAGE_FEATURES="$PACKAGE_FEATURES testagents"
+fi
+
 if test "x${enable_rdma}" = xyes; then
 	PKG_CHECK_MODULES([rdmacm],[rdmacm])
 	PKG_CHECK_MODULES([ibverbs],[ibverbs])
 	AC_DEFINE_UNQUOTED([HAVE_RDMA], 1, [have rdmacm])
 	PACKAGE_FEATURES="$PACKAGE_FEATURES rdma"
 fi
+
+if test "x${enable_monitoring}" = xyes; then
+
+	AC_CHECK_LIB([statgrab], [sg_get_mem_stats], have_libstatgrab="yes", have_libstatgrab="no")
+
+	if test "x${have_libstatgrab}" = xyes; then
+		AC_DEFINE_UNQUOTED([HAVE_LIBSTATGRAB], 1, [have libstatgrab])
+		statgrab_LIBS="-lstatgrab"
+	else
+		if test "x${have_linux}" = xno; then
+			AC_MSG_ERROR(monitoring requires libstatgrab on non-linux systems)
+		fi
+	fi
+	AC_SUBST([statgrab_LIBS])
+	AC_DEFINE_UNQUOTED([HAVE_MONITORING], 1, [have resource monitoring])
+	PACKAGE_FEATURES="$PACKAGE_FEATURES monitoring"
+fi
+
+if test "x${enable_watchdog}" = xyes; then
+	AC_CHECK_HEADER(linux/watchdog.h,,AC_MSG_ERROR(watchdog requires linux/watchdog.h))
+	AC_CHECK_HEADER(linux/reboot.h,,AC_MSG_ERROR(watchdog requires linux/reboot.h))
+	AC_DEFINE_UNQUOTED([HAVE_WATCHDOG], 1, [have watchdog])
+	PACKAGE_FEATURES="$PACKAGE_FEATURES watchdog"
+fi
+
+if test "x${enable_augeas}" = xyes; then
+	PACKAGE_FEATURES="$PACKAGE_FEATURES augeas"
+fi
+
+if test "x${enable_snmp}" = xyes; then
+       SNMPCONFIG=""
+       AC_CHECK_HEADERS(net-snmp/net-snmp-config.h)
+
+       if test "x${ac_cv_header_net_snmp_net_snmp_config_h}" != "xyes"; then
+               enable_snmp=no
+       fi
+
+       if test $enable_snmp != no; then
+               AC_PATH_PROGS(SNMPCONFIG, net-snmp-config)
+               if test "X${SNMPCONFIG}" = "X"; then
+                       AC_MSG_RESULT(You need the net_snmp development package to continue.)
+                       enable_snmp=no
+               fi
+       fi
+
+       if test $enable_snmp != no; then
+               AC_MSG_CHECKING(for special snmp libraries)
+               SNMPLIBS=`$SNMPCONFIG --libs`
+               AC_MSG_RESULT($SNMPLIBS)
+       fi
+
+       if test $enable_snmp != no; then
+               savedLibs=$LIBS
+               LIBS="$LIBS $SNMPLIBS"
+               AC_CHECK_FUNCS(netsnmp_transport_open_client)
+               if test $ac_cv_func_netsnmp_transport_open_client != yes; then
+                       AC_CHECK_FUNCS(netsnmp_tdomain_transport)
+                       if test $ac_cv_func_netsnmp_tdomain_transport != yes; then
+                               enable_snmp=no
+                       fi
+               else
+                       AC_DEFINE_UNQUOTED([NETSNMPV54], $NETSNMP_NEW_SUPPORT, [have net-snmp5.4 over])
+               fi
+               LIBS=$savedLibs
+       fi
+
+       AC_MSG_CHECKING(for snmp)
+       AC_MSG_RESULT($enable_snmp)
+   if test $enable_snmp = no; then
+               enable_snmp=0
+               AC_MSG_ERROR(Unable to support SNMP)
+   else
+               enable_snmp=1
+               PACKAGE_FEATURES="$PACKAGE_FEATURES snmp"
+               AC_DEFINE_UNQUOTED([ENABLE_SNMP], $enable_snmp, [Build in support for sending SNMP traps])
+   fi
+else
+       enable_snmp=0
+fi
+AC_SUBST([SNMPLIBS])
+AC_SUBST([SNMP_LCRSO])
+AM_CONDITIONAL(BUILD_SNMP, test "${enable_snmp}" = "1")
 
 # extra warnings
 EXTRA_WARNINGS=""
@@ -395,6 +539,13 @@ else
 	WERROR_CFLAGS=""
 fi
 
+# don't add addtional cflags
+if test "x${enable_user_flags}" = xyes; then
+  OPT_CFLAGS=""
+  GDB_FLAGS=""
+  EXTRA_WARNINGS=""
+fi
+
 # final build of *FLAGS
 CFLAGS="$ENV_CFLAGS $OPT_CFLAGS $GDB_FLAGS $OS_CFLAGS \
 	$COVERAGE_CFLAGS $EXTRA_WARNINGS $WERROR_CFLAGS $NSS_CFLAGS"
@@ -410,12 +561,12 @@ AC_SUBST([SOMAJOR])
 AC_SUBST([SOMINOR])
 AC_SUBST([SOMICRO])
 AC_SUBST([SONAME])
-AC_SUBST([CPG_SONAME])
-
+AC_SUBST([COVERAGE_LCRSO_EXTRA_LDFLAGS])
 AC_SUBST([OS_DYFLAGS])
 
 AC_SUBST([OS_LDL])
-
+AM_CONDITIONAL(INSTALL_MIB, test "${enable_snmp}" = "1")
+AM_CONDITIONAL(INSTALL_DBUSCONF, test "${enable_dbus}" = "1")
 AC_SUBST([NSS_LDFLAGS])
 
 AM_CONDITIONAL(BUILD_DARWIN, test -n "${DARWIN_OPTS}")
@@ -459,7 +610,7 @@ AC_MSG_RESULT([  Features                 =${PACKAGE_FEATURES}])
 AC_MSG_RESULT([])
 AC_MSG_RESULT([$PACKAGE build info:])
 AC_MSG_RESULT([  Library SONAME           = ${SONAME}])
-AC_MSG_RESULT([  CPG Library SONAME       = ${CPG_SONAME}])
+LIB_MSG_RESULT(m4_shift(local_soname_list))dnl
 AC_MSG_RESULT([  Default optimization     = ${OPT_CFLAGS}])
 AC_MSG_RESULT([  Default debug options    = ${GDB_CFLAGS}])
 AC_MSG_RESULT([  Extra compiler warnings  = ${EXTRA_WARNING}])

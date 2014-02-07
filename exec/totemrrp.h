@@ -123,9 +123,20 @@ extern int totemrrp_crypto_set (
 	unsigned int type);
 
 extern int totemrrp_ring_reenable (
-	void *rrp_context);
+	void *rrp_context,
+	unsigned int iface_no);
 
 extern int totemrrp_mcast_recv_empty (
 	void *rrp_context);
+
+extern int totemrrp_member_add (
+        void *net_context,
+        const struct totem_ip_address *member,
+	int iface_no);
+
+extern int totemrrp_member_remove (
+        void *net_context,
+        const struct totem_ip_address *member,
+	int iface_no);
 
 #endif /* TOTEMRRP_H_DEFINED */

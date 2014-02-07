@@ -54,6 +54,8 @@
 #include <corosync/lcr/lcr_comp.h>
 #include <corosync/engine/objdb.h>
 #include <corosync/engine/config.h>
+#define LOGSYS_UTILS_ONLY 1
+#include <corosync/engine/logsys.h>
 
 #include "util.h"
 
@@ -188,7 +190,7 @@ static int parse_section(FILE *fp,
 				value, strlen (value) + 1, OBJDB_VALUETYPE_STRING);
 		}
 
-		if ((loc = strchr_rs (line, '}'))) {
+		if (strchr_rs (line, '}')) {
 			return 0;
 		}
 	}
@@ -229,34 +231,6 @@ static int parser_check_item_uidgid(struct objdb_iface_ver0 *objdb,
 	return 1;
 }
 
-static int parser_check_item_service(struct objdb_iface_ver0 *objdb,
-			hdb_handle_t parent_handle,
-			int type,
-			const char *name,
-			const char **error_string)
-{
-	if (type == PCHECK_ADD_SUBSECTION) {
-		if (parent_handle != OBJECT_PARENT_HANDLE) {
-			*error_string = "service: Can't add second level subsection";
-			return 0;
-		}
-
-		if (strcmp (name, "service") != 0) {
-			*error_string = "service: Can't add subsection different then service";
-			return 0;
-		}
-	}
-
-	if (type == PCHECK_ADD_ITEM) {
-		if (!(strcmp (name, "name") == 0 || strcmp (name, "ver") == 0)) {
-			*error_string = "service: Only name and ver are allowed items";
-			return 0;
-		}
-	}
-
-	return 1;
-}
-
 static int read_uidgid_files_into_objdb(
 	struct objdb_iface_ver0 *objdb,
 	const char **error_string)
@@ -278,9 +252,13 @@ static int read_uidgid_files_into_objdb(
 	if (dp == NULL)
 		return 0;
 
-	len = offsetof(struct dirent, d_name) +
-                     pathconf(dirname, _PC_NAME_MAX) + 1;
+	len = offsetof(struct dirent, d_name) + NAME_MAX + 1;
+
 	entry = malloc(len);
+	if (entry == NULL) {
+		res = 0;
+		goto error_exit;
+	}
 
 	for (return_code = readdir_r(dp, entry, &dirent);
 		dirent != NULL && return_code == 0;
@@ -331,9 +309,13 @@ static int read_service_files_into_objdb(
 	if (dp == NULL)
 		return 0;
 
-	len = offsetof(struct dirent, d_name) +
-                     pathconf(dirname, _PC_NAME_MAX) + 1;
+	len = offsetof(struct dirent, d_name) + NAME_MAX + 1;
+
 	entry = malloc(len);
+	if (entry == NULL) {
+		res = 0;
+		goto error_exit;
+	}
 
 	for (return_code = readdir_r(dp, entry, &dirent);
 		dirent != NULL && return_code == 0;
@@ -346,7 +328,7 @@ static int read_service_files_into_objdb(
 			fp = fopen (filename, "r");
 			if (fp == NULL) continue;
 
-			res = parse_section(fp, objdb, OBJECT_PARENT_HANDLE, error_string, parser_check_item_service);
+			res = parse_section(fp, objdb, OBJECT_PARENT_HANDLE, error_string, NULL);
 
 			fclose (fp);
 
@@ -380,10 +362,11 @@ static int read_config_file_into_objdb(
 	fp = fopen (filename, "r");
 	if (fp == NULL) {
 		char error_str[100];
-		strerror_r (errno, error_str, 100);
+		const char *error_ptr;
+		LOGSYS_STRERROR_R (error_ptr, errno, error_str, sizeof(error_str));
 		snprintf (error_reason, sizeof(error_string_response),
 			"Can't read file %s reason = (%s)\n",
-			 filename, error_str);
+			 filename, error_ptr);
 		*error_string = error_reason;
 		return -1;
 	}

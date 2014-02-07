@@ -38,6 +38,7 @@
 #include <pthread.h>
 #include <assert.h>
 #include <sys/types.h>
+#include <sys/file.h>
 #include <sys/poll.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
@@ -86,6 +87,12 @@
 #include "schedwrk.h"
 #include "evil.h"
 
+#ifdef HAVE_SMALL_MEMORY_FOOTPRINT
+#define IPC_LOGSYS_SIZE			1024*64
+#else
+#define IPC_LOGSYS_SIZE			8192*128
+#endif
+
 LOGSYS_DECLARE_SYSTEM ("corosync",
 	LOGSYS_MODE_OUTPUT_STDERR | LOGSYS_MODE_THREADED | LOGSYS_MODE_FORK,
 	0,
@@ -94,7 +101,7 @@ LOGSYS_DECLARE_SYSTEM ("corosync",
 	LOG_DAEMON,
 	LOG_INFO,
 	NULL,
-	1000000);
+	IPC_LOGSYS_SIZE);
 
 LOGSYS_DECLARE_SUBSYS ("MAIN");
 
@@ -104,11 +111,7 @@ static int sched_priority = 0;
 
 static unsigned int service_count = 32;
 
-#if defined(HAVE_PTHREAD_SPIN_LOCK)
-static pthread_spinlock_t serialize_spin;
-#else
 static pthread_mutex_t serialize_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
 
 static struct totem_logging_configuration totem_logging_configuration;
 
@@ -130,11 +133,21 @@ struct sched_param global_sched_param;
 
 static hdb_handle_t object_connection_handle;
 
+static hdb_handle_t object_memb_handle;
+
 static corosync_timer_handle_t corosync_stats_timer_handle;
 
 static pthread_t corosync_exit_thread;
 
 static sem_t corosync_exit_sem;
+
+static const char *corosync_lock_file = LOCALSTATEDIR"/run/corosync.pid";
+
+static int32_t corosync_not_enough_fds_left = 0;
+
+static void serialize_unlock (void);
+
+static void serialize_lock (void);
 
 hdb_handle_t corosync_poll_handle_get (void)
 {
@@ -154,10 +167,16 @@ void corosync_state_dump (void)
 
 static void unlink_all_completed (void)
 {
+	/*
+	 * The schedwrk_do API takes the global serializer lock
+	 * but doesn't release it because this exit callback is called
+	 * before it finishes.  Since we know we are exiting, we unlock it
+	 * here
+	 */
+	serialize_unlock ();
+	api->timer_delete (corosync_stats_timer_handle);
 	poll_stop (corosync_poll_handle);
-	totempg_finalize ();
-
-	corosync_exit_error (AIS_DONE_EXIT);
+	serialize_lock ();
 }
 
 void corosync_shutdown_request (void)
@@ -175,7 +194,16 @@ void corosync_shutdown_request (void)
 
 static void *corosync_exit_thread_handler (void *arg)
 {
+	totempg_stats_t * stats;
+
 	sem_wait (&corosync_exit_sem);
+
+	stats = api->totem_get_stats();
+	if (stats->mrp->srp->continuous_gather > MAX_NO_CONT_GATHER ||
+	    stats->mrp->srp->operational_entered == 0) {
+		unlink_all_completed ();
+		/* NOTREACHED */
+	}
 
 	corosync_service_unlink_all (api, unlink_all_completed);
 
@@ -184,11 +212,8 @@ static void *corosync_exit_thread_handler (void *arg)
 
 static void sigusr2_handler (int num)
 {
-	/*
-	 * TODO remove this from sigusr2 handler and access via cfg service
-	 * engine api - corosync-cfgtool
-	 */
 	corosync_state_dump ();
+	logsys_log_rec_store (LOCALSTATEDIR "/lib/corosync/fdata");
 }
 
 static void sigterm_handler (int num)
@@ -233,17 +258,6 @@ static struct totempg_group corosync_group = {
 
 
 
-#if defined(HAVE_PTHREAD_SPIN_LOCK)
-static void serialize_lock (void)
-{
-	pthread_spin_lock (&serialize_spin);
-}
-
-static void serialize_unlock (void)
-{
-	pthread_spin_unlock (&serialize_spin);
-}
-#else
 static void serialize_lock (void)
 {
 	pthread_mutex_lock (&serialize_mutex);
@@ -253,7 +267,6 @@ static void serialize_unlock (void)
 {
 	pthread_mutex_unlock (&serialize_mutex);
 }
-#endif
 
 static void corosync_sync_completed (void)
 {
@@ -336,6 +349,77 @@ static int corosync_sync_v2_callbacks_retrieve (
 
 static struct memb_ring_id corosync_ring_id;
 
+static void member_object_joined (unsigned int nodeid)
+{
+	hdb_handle_t object_find_handle;
+	hdb_handle_t object_node_handle;
+	char * nodeint_str;
+	char nodeid_str[64];
+	unsigned int key_incr_dummy;
+
+	snprintf (nodeid_str, 64, "%d", nodeid);
+
+	objdb->object_find_create (
+		object_memb_handle,
+		nodeid_str,
+		strlen (nodeid_str),
+		&object_find_handle);
+
+	if (objdb->object_find_next (object_find_handle,
+			&object_node_handle) == 0) {
+
+		objdb->object_key_increment (object_node_handle,
+			"join_count", strlen("join_count"),
+			&key_incr_dummy);
+
+		objdb->object_key_replace (object_node_handle,
+			"status", strlen("status"),
+			"joined", strlen("joined"));
+	} else {
+		nodeint_str = (char*)api->totem_ifaces_print (nodeid);
+		objdb->object_create (object_memb_handle,
+			&object_node_handle,
+			nodeid_str, strlen (nodeid_str));
+
+		objdb->object_key_create_typed (object_node_handle,
+			"ip",
+			nodeint_str, strlen(nodeint_str),
+			OBJDB_VALUETYPE_STRING);
+		key_incr_dummy = 1;
+		objdb->object_key_create_typed (object_node_handle,
+			"join_count",
+			&key_incr_dummy, sizeof (key_incr_dummy),
+			OBJDB_VALUETYPE_UINT32);
+		objdb->object_key_create_typed (object_node_handle,
+			"status",
+			"joined", strlen("joined"),
+			OBJDB_VALUETYPE_STRING);
+	}
+}
+
+static void member_object_left (unsigned int nodeid)
+{
+	hdb_handle_t object_find_handle;
+	hdb_handle_t object_node_handle;
+	char nodeid_str[64];
+
+	snprintf (nodeid_str, 64, "%u", nodeid);
+
+	objdb->object_find_create (
+		object_memb_handle,
+		nodeid_str,
+		strlen (nodeid_str),
+		&object_find_handle);
+
+	if (objdb->object_find_next (object_find_handle,
+			&object_node_handle) == 0) {
+
+		objdb->object_key_replace (object_node_handle,
+			"status", strlen("status"),
+			"left", strlen("left"));
+	}
+}
+
 static void confchg_fn (
 	enum totem_configuration_type configuration_type,
 	const unsigned int *member_list, size_t member_list_entries,
@@ -353,6 +437,12 @@ static void confchg_fn (
 	serialize_lock ();
 	memcpy (&corosync_ring_id, ring_id, sizeof (struct memb_ring_id));
 
+	for (i = 0; i < left_list_entries; i++) {
+		member_object_left (left_list[i]);
+	}
+	for (i = 0; i < joined_list_entries; i++) {
+		member_object_joined (joined_list[i]);
+	}
 	/*
 	 * Call configuration change for all services
 	 */
@@ -384,7 +474,7 @@ static void priv_drop (void)
 
 static void corosync_tty_detach (void)
 {
-	int fd;
+	FILE *r;
 
 	/*
 	 * Disconnect from TTY if this is not a debug run
@@ -398,11 +488,6 @@ static void corosync_tty_detach (void)
 			/*
 			 * child which is disconnected, run this process
 			 */
-/* 			setset();
-			close (0);
-			close (1);
-			close (2);
-*/
 			break;
 		default:
 			exit (0);
@@ -415,16 +500,17 @@ static void corosync_tty_detach (void)
 	/*
 	 * Map stdin/out/err to /dev/null.
 	 */
-	fd = open("/dev/null", O_RDWR);
-	if (fd >= 0) {
-		/* dup2 to 0 / 1 / 2 (stdin / stdout / stderr) */
-		dup2(fd, STDIN_FILENO);  /* 0 */
-		dup2(fd, STDOUT_FILENO); /* 1 */
-		dup2(fd, STDERR_FILENO); /* 2 */
-
-		/* Should be 0, but just in case it isn't... */
-		if (fd > 2)
-			close(fd);
+	r = freopen("/dev/null", "r", stdin);
+	if (r == NULL) {
+		corosync_exit_error (AIS_DONE_STD_TO_NULL_REDIR);
+	}
+	r = freopen("/dev/null", "a", stderr);
+	if (r == NULL) {
+		corosync_exit_error (AIS_DONE_STD_TO_NULL_REDIR);
+	}
+	r = freopen("/dev/null", "a", stdout);
+	if (r == NULL) {
+		corosync_exit_error (AIS_DONE_STD_TO_NULL_REDIR);
 	}
 }
 
@@ -451,11 +537,8 @@ static void corosync_mlockall (void)
 #else
 	res = mlockall (MCL_CURRENT | MCL_FUTURE);
 	if (res == -1) {
-		char error_str[100];
-		strerror_r (errno, error_str, 100);
-		log_printf (LOGSYS_LEVEL_WARNING,
-			"Could not lock memory of service to avoid page faults: %s\n",
-			error_str);
+		LOGSYS_PERROR (errno, LOGSYS_LEVEL_WARNING,
+			"Could not lock memory of service to avoid page faults");
 	};
 #endif
 }
@@ -472,8 +555,16 @@ static void corosync_totem_stats_updater (void *data)
 	uint32_t total_token_holdtime;
 	int t, prev;
 	int32_t token_count;
+	uint32_t firewall_enabled_or_nic_failure;
 
 	stats = api->totem_get_stats();
+
+	objdb->object_key_replace (stats->hdr.handle,
+		"msg_reserved", strlen("msg_reserved"),
+		&stats->msg_reserved, sizeof (stats->msg_reserved));
+	objdb->object_key_replace (stats->hdr.handle,
+		"msg_queue_avail", strlen("msg_queue_avail"),
+		&stats->msg_queue_avail, sizeof (stats->msg_queue_avail));
 
 	objdb->object_key_replace (stats->mrp->srp->hdr.handle,
 		"orf_token_tx", strlen("orf_token_tx"),
@@ -544,6 +635,14 @@ static void corosync_totem_stats_updater (void *data)
 	objdb->object_key_replace (stats->mrp->srp->hdr.handle,
 		"rx_msg_dropped", strlen("rx_msg_dropped"),
 		&stats->mrp->srp->rx_msg_dropped, sizeof (stats->mrp->srp->rx_msg_dropped));
+	objdb->object_key_replace (stats->mrp->srp->hdr.handle,
+		"continuous_gather", strlen("continuous_gather"),
+		&stats->mrp->srp->continuous_gather, sizeof (stats->mrp->srp->continuous_gather));
+
+	firewall_enabled_or_nic_failure = (stats->mrp->srp->continuous_gather > MAX_NO_CONT_GATHER ? 1 : 0);
+	objdb->object_key_replace (stats->mrp->srp->hdr.handle,
+		"firewall_enabled_or_nic_failure", strlen("firewall_enabled_or_nic_failure"),
+		&firewall_enabled_or_nic_failure, sizeof (firewall_enabled_or_nic_failure));
 
 	total_mtt_rx_token = 0;
 	total_token_holdtime = 0;
@@ -571,13 +670,12 @@ static void corosync_totem_stats_updater (void *data)
 		mtt_rx_token = (total_mtt_rx_token / token_count);
 		avg_backlog_calc = (total_backlog_calc / token_count);
 		avg_token_holdtime = (total_token_holdtime / token_count);
-
 		objdb->object_key_replace (stats->mrp->srp->hdr.handle,
 			"mtt_rx_token", strlen("mtt_rx_token"),
 			&mtt_rx_token, sizeof (mtt_rx_token));
 		objdb->object_key_replace (stats->mrp->srp->hdr.handle,
 			"avg_token_workload", strlen("avg_token_workload"),
-			&avg_token_holdtime, sizeof (avg_backlog_calc));
+			&avg_token_holdtime, sizeof (avg_token_holdtime));
 		objdb->object_key_replace (stats->mrp->srp->hdr.handle,
 			"avg_backlog_calc", strlen("avg_backlog_calc"),
 			&avg_backlog_calc, sizeof (avg_backlog_calc));
@@ -619,6 +717,18 @@ static void corosync_totem_stats_init (void)
 		objdb->object_create (stats->mrp->hdr.handle,
 			&stats->mrp->srp->hdr.handle,
 			"srp", strlen ("srp"));
+
+		objdb->object_key_create_typed (stats->hdr.handle,
+			"msg_reserved", &stats->msg_reserved,
+			sizeof (stats->msg_reserved), OBJDB_VALUETYPE_UINT32);
+		objdb->object_key_create_typed (stats->hdr.handle,
+			"msg_queue_avail", &stats->msg_queue_avail,
+			sizeof (stats->msg_queue_avail), OBJDB_VALUETYPE_UINT32);
+
+		/* Members object */
+		objdb->object_create (stats->mrp->srp->hdr.handle,
+			&object_memb_handle,
+			"members", strlen ("members"));
 
 		objdb->object_key_create_typed (stats->mrp->srp->hdr.handle,
 			"orf_token_tx",	&stats->mrp->srp->orf_token_tx,
@@ -693,11 +803,17 @@ static void corosync_totem_stats_init (void)
 			"avg_token_workload", &zero_32,
 			sizeof (zero_32), OBJDB_VALUETYPE_UINT32);
 		objdb->object_key_create_typed (stats->mrp->srp->hdr.handle,
-			"avg_backlog_calc", &zero_64,
-			sizeof (zero_64), OBJDB_VALUETYPE_UINT64);
+			"avg_backlog_calc", &zero_32,
+			sizeof (zero_32), OBJDB_VALUETYPE_UINT32);
 		objdb->object_key_create_typed (stats->mrp->srp->hdr.handle,
 			"rx_msg_dropped", &zero_64,
 			sizeof (zero_64), OBJDB_VALUETYPE_UINT64);
+		objdb->object_key_create_typed (stats->mrp->srp->hdr.handle,
+			"continuous_gather", &zero_32,
+			sizeof (zero_32), OBJDB_VALUETYPE_UINT32);
+		objdb->object_key_create_typed (stats->mrp->srp->hdr.handle,
+			"firewall_enabled_or_nic_failure", &zero_32,
+			sizeof (zero_32), OBJDB_VALUETYPE_UINT32);
 
 	}
 	/* start stats timer */
@@ -744,6 +860,12 @@ static void deliver_fn (
 	}
 
 	if (!ais_service[service]) {
+		serialize_unlock();
+		return;
+	}
+	if (fn_id >= ais_service[service]->exec_engine_count) {
+		log_printf(LOGSYS_LEVEL_WARNING, "discarded unknown message %d for service %d (max id %d)",
+			fn_id, service, ais_service[service]->exec_engine_count);
 		serialize_unlock();
 		return;
 	}
@@ -839,6 +961,12 @@ static coroipcs_handler_fn_lvalue corosync_handler_fn_get (unsigned int service,
 static int corosync_security_valid (int euid, int egid)
 {
 	struct list_head *iter;
+
+	if (corosync_not_enough_fds_left) {
+		errno = EMFILE;
+		return 0;
+	}
+
 	if (euid == 0 || egid == 0) {
 		return (1);
 	}
@@ -853,6 +981,7 @@ static int corosync_security_valid (int euid, int egid)
 			return (1);
 	}
 
+	errno = EACCES;
 	return (0);
 }
 
@@ -911,6 +1040,8 @@ static void corosync_sending_allowed_release (void *sending_allowed_private_data
 
 static int ipc_subsys_id = -1;
 
+
+static void ipc_fatal_error(const char *error_msg) __attribute__((noreturn));
 
 static void ipc_fatal_error(const char *error_msg) {
        _logsys_log_printf (
@@ -1044,6 +1175,16 @@ static hdb_handle_t corosync_stats_create_connection (const char* name,
 		&zero_64, sizeof (zero_64),
 		OBJDB_VALUETYPE_UINT64);
 
+	objdb->object_key_create_typed (object_handle,
+		"invalid_request",
+		&zero_64, sizeof (zero_64),
+		OBJDB_VALUETYPE_UINT64);
+
+	objdb->object_key_create_typed (object_handle,
+		"overload",
+		&zero_64, sizeof (zero_64),
+		OBJDB_VALUETYPE_UINT64);
+
 	return object_handle;
 }
 
@@ -1128,12 +1269,11 @@ static void corosync_setscheduler (void)
 		global_sched_param.sched_priority = sched_priority;
 		res = sched_setscheduler (0, SCHED_RR, &global_sched_param);
 		if (res == -1) {
-			char error_str[100];
-			strerror_r (errno, error_str, 100);
-			global_sched_param.sched_priority = 0;
-			log_printf (LOGSYS_LEVEL_WARNING, "Could not set SCHED_RR at priority %d: %s\n",
-				global_sched_param.sched_priority, error_str);
+			LOGSYS_PERROR(errno, LOGSYS_LEVEL_WARNING,
+				"Could not set SCHED_RR at priority %d",
+				global_sched_param.sched_priority);
 
+			global_sched_param.sched_priority = 0;
 			logsys_thread_priority_set (SCHED_OTHER, NULL, 1);
 		} else {
 			/*
@@ -1153,17 +1293,65 @@ static void corosync_setscheduler (void)
 			}
 		}
 	} else {
-		char error_str[100];
-		strerror_r (errno, error_str, 100);
-		log_printf (LOGSYS_LEVEL_WARNING,
-			"Could not get maximum scheduler priority: %s\n",
-			error_str);
+		LOGSYS_PERROR (errno, LOGSYS_LEVEL_WARNING,
+			"Could not get maximum scheduler priority");
 		sched_priority = 0;
 	}
 #else
 	log_printf(LOGSYS_LEVEL_WARNING,
 		"The Platform is missing process priority setting features.  Leaving at default.");
 #endif
+}
+
+static void fplay_key_change_notify_fn (
+	object_change_type_t change_type,
+	hdb_handle_t parent_object_handle,
+	hdb_handle_t object_handle,
+	const void *object_name_pt, size_t object_name_len,
+	const void *key_name_pt, size_t key_len,
+	const void *key_value_pt, size_t key_value_len,
+	void *priv_data_pt)
+{
+	if (key_len == strlen ("dump_flight_data") &&
+		memcmp ("dump_flight_data", key_name_pt, key_len) == 0) {
+		logsys_log_rec_store (LOCALSTATEDIR "/lib/corosync/fdata");
+	}
+	if (key_len == strlen ("dump_state") &&
+		memcmp ("dump_state", key_name_pt, key_len) == 0) {
+		corosync_state_dump ();
+	}
+}
+
+static void corosync_fplay_control_init (void)
+{
+	hdb_handle_t object_find_handle;
+	hdb_handle_t object_runtime_handle;
+	hdb_handle_t object_blackbox_handle;
+
+	objdb->object_find_create (OBJECT_PARENT_HANDLE,
+		"runtime", strlen ("runtime"),
+		&object_find_handle);
+
+	if (objdb->object_find_next (object_find_handle,
+			&object_runtime_handle) != 0) {
+		return;
+	}
+
+	objdb->object_create (object_runtime_handle,
+		&object_blackbox_handle,
+		"blackbox", strlen ("blackbox"));
+
+	objdb->object_key_create_typed (object_blackbox_handle,
+		"dump_flight_data", "no", strlen("no"),
+		OBJDB_VALUETYPE_STRING);
+	objdb->object_key_create_typed (object_blackbox_handle,
+		"dump_state", "no", strlen("no"),
+		OBJDB_VALUETYPE_STRING);
+
+	objdb->object_track_start (object_blackbox_handle,
+		OBJECT_TRACK_DEPTH_RECURSIVE,
+		fplay_key_change_notify_fn,
+		NULL, NULL, NULL, NULL);
 }
 
 static void corosync_stats_init (void)
@@ -1194,6 +1382,17 @@ static void corosync_stats_init (void)
 		OBJDB_VALUETYPE_UINT64);
 }
 
+static void main_low_fds_event(int32_t not_enough, int32_t fds_available)
+{
+	corosync_not_enough_fds_left = not_enough;
+	if (not_enough) {
+		log_printf(LOGSYS_LEVEL_WARNING, "refusing new connections (fds_available:%d)\n",
+			fds_available);
+	} else {
+		log_printf(LOGSYS_LEVEL_NOTICE, "allowing new connections (fds_available:%d)\n",
+			fds_available);
+	}
+}
 
 static void main_service_ready (void)
 {
@@ -1209,6 +1408,7 @@ static void main_service_ready (void)
 	evil_init (api);
 	corosync_stats_init ();
 	corosync_totem_stats_init ();
+	corosync_fplay_control_init ();
 	if (minimum_sync_mode == CS_SYNC_V2) {
 		log_printf (LOGSYS_LEVEL_NOTICE, "Compatibility mode set to none.  Using V2 of the synchronization engine.\n");
 		sync_v2_init (
@@ -1231,7 +1431,94 @@ static void main_service_ready (void)
 
 }
 
-int main (int argc, char **argv)
+static enum e_ais_done corosync_flock (const char *lockfile, pid_t pid)
+{
+	struct flock lock;
+	enum e_ais_done err;
+	char pid_s[17];
+	int fd_flag;
+	int lf;
+
+	err = AIS_DONE_EXIT;
+
+	lf = open (lockfile, O_WRONLY | O_CREAT, 0640);
+	if (lf == -1) {
+		log_printf (LOGSYS_LEVEL_ERROR, "Corosync Executive couldn't create lock file.\n");
+		return (AIS_DONE_AQUIRE_LOCK);
+	}
+
+retry_fcntl:
+	lock.l_type = F_WRLCK;
+	lock.l_start = 0;
+	lock.l_whence = SEEK_SET;
+	lock.l_len = 0;
+	if (fcntl (lf, F_SETLK, &lock) == -1) {
+		switch (errno) {
+		case EINTR:
+			goto retry_fcntl;
+			break;
+		case EAGAIN:
+		case EACCES:
+			log_printf (LOGSYS_LEVEL_ERROR, "Another Corosync instance is already running.\n");
+			err = AIS_DONE_ALREADY_RUNNING;
+			goto error_close;
+			break;
+		default:
+			log_printf (LOGSYS_LEVEL_ERROR, "Corosync Executive couldn't aquire lock. Error was %s\n",
+			    strerror(errno));
+			err = AIS_DONE_AQUIRE_LOCK;
+			goto error_close;
+			break;
+		}
+	}
+
+	if (ftruncate (lf, 0) == -1) {
+		log_printf (LOGSYS_LEVEL_ERROR, "Corosync Executive couldn't truncate lock file. Error was %s\n",
+		    strerror (errno));
+		err = AIS_DONE_AQUIRE_LOCK;
+		goto error_close_unlink;
+	}
+
+	memset (pid_s, 0, sizeof (pid_s));
+	snprintf (pid_s, sizeof (pid_s) - 1, "%u\n", pid);
+
+retry_write:
+	if (write (lf, pid_s, strlen (pid_s)) != strlen (pid_s)) {
+		if (errno == EINTR) {
+			goto retry_write;
+		} else {
+			log_printf (LOGSYS_LEVEL_ERROR, "Corosync Executive couldn't write pid to lock file. "
+				"Error was %s\n", strerror (errno));
+			err = AIS_DONE_AQUIRE_LOCK;
+			goto error_close_unlink;
+		}
+	}
+
+	if ((fd_flag = fcntl (lf, F_GETFD, 0)) == -1) {
+		log_printf (LOGSYS_LEVEL_ERROR, "Corosync Executive couldn't get close-on-exec flag from lock file. "
+			"Error was %s\n", strerror (errno));
+		err = AIS_DONE_AQUIRE_LOCK;
+		goto error_close_unlink;
+	}
+	fd_flag |= FD_CLOEXEC;
+	if (fcntl (lf, F_SETFD, fd_flag) == -1) {
+		log_printf (LOGSYS_LEVEL_ERROR, "Corosync Executive couldn't set close-on-exec flag to lock file. "
+			"Error was %s\n", strerror (errno));
+		err = AIS_DONE_AQUIRE_LOCK;
+		goto error_close_unlink;
+	}
+
+	return (err);
+
+error_close_unlink:
+	unlink (lockfile);
+error_close:
+	close (lf);
+
+	return (err);
+}
+
+int main (int argc, char **argv, char **envp)
 {
 	const char *error_string;
 	struct totem_config totem_config;
@@ -1250,10 +1537,7 @@ int main (int argc, char **argv)
 	struct stat stat_out;
 	char corosync_lib_dir[PATH_MAX];
 	hdb_handle_t object_runtime_handle;
-
-#if defined(HAVE_PTHREAD_SPIN_LOCK)
-	pthread_spin_init (&serialize_spin, 0);
-#endif
+	enum e_ais_done flock_err;
 
  	/* default configuration
 	 */
@@ -1271,7 +1555,7 @@ int main (int argc, char **argv)
 				setprio = 0;
 				break;
 			case 'v':
-				printf ("Corosync Cluster Engine, version '%s' SVN revision '%s'\n", VERSION, SVN_REVISION);
+				printf ("Corosync Cluster Engine, version '%s'\n", VERSION);
 				printf ("Copyright (c) 2006-2009 Red Hat, Inc.\n");
 				return EXIT_SUCCESS;
 
@@ -1299,6 +1583,7 @@ int main (int argc, char **argv)
 
 	log_printf (LOGSYS_LEVEL_NOTICE, "Corosync Cluster Engine ('%s'): started and ready to provide service.\n", VERSION);
 	log_printf (LOGSYS_LEVEL_INFO, "Corosync built-in features:" PACKAGE_FEATURES "\n");
+
 
 	(void)signal (SIGINT, sigintr_handler);
 	(void)signal (SIGUSR2, sigusr2_handler);
@@ -1469,12 +1754,17 @@ int main (int argc, char **argv)
 	}
 	logsys_fork_completed();
 
+	if ((flock_err = corosync_flock (corosync_lock_file, getpid ())) != AIS_DONE_EXIT) {
+		corosync_exit_error (flock_err);
+	}
+
 	corosync_timer_init (
 		serialize_lock,
 		serialize_unlock,
 		sched_priority);
 
 	corosync_poll_handle = poll_create ();
+	poll_low_fds_event_set(corosync_poll_handle, main_low_fds_event);
 
 	/*
 	 * Sleep for a while to let other nodes in the cluster
@@ -1555,6 +1845,17 @@ int main (int argc, char **argv)
 	 */
 	poll_run (corosync_poll_handle);
 
+	/*
+	 * Exit was requested
+	 */
+	totempg_finalize ();
+
+	/*
+	 * Remove pid lock file
+	 */
+	unlink (corosync_lock_file);
+
+	corosync_exit_error (AIS_DONE_EXIT);
+
 	return EXIT_SUCCESS;
 }
-

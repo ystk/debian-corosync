@@ -39,6 +39,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -312,7 +313,7 @@ static int corosync_main_config_set (
 {
 	const char *error_reason = error_string_response;
 	char *value;
-	unsigned int mode;
+	int mode;
 
 	/*
 	 * this bit abuses the internal logsys exported API
@@ -528,21 +529,25 @@ static int corosync_main_config_read_logging (
 				object_logger_subsys_handle,
 				"name", &value)) {
 
-				if ((strcmp(value, "corosync") == 0) &&
-				   (!objdb_get_string (objdb,
-					object_logger_subsys_handle,
-					"subsys", &value))) {
-
-					if (corosync_main_config_set (objdb,
-							object_logger_subsys_handle,
-							value,
-							&error_reason) < 0) {
-						goto parse_error;
+				if (strcmp(value, "corosync") == 0) {
+					if (!objdb_get_string (objdb,
+						object_logger_subsys_handle,
+						"subsys", &value)) {
+						if (corosync_main_config_set (objdb,
+								object_logger_subsys_handle,
+								value,
+								&error_reason) < 0) {
+							goto parse_error;
+						}
 					}
-				}
-				else {
-					error_reason = "subsys required for logging_daemon directive";
-					goto parse_error;
+					else {
+						if (corosync_main_config_set (objdb,
+								object_logger_subsys_handle,
+								NULL,
+								&error_reason) < 0) {
+							goto parse_error;
+						}
+					}
 				}
 			}
 			else {
@@ -564,11 +569,20 @@ parse_error:
 
 static int uid_determine (const char *req_user)
 {
+	int pw_uid = 0;
 	struct passwd passwd;
 	struct passwd* pwdptr = &passwd;
 	struct passwd* temp_pwd_pt;
-	char pwdbuffer[200];
-	int  pwdlinelen = sizeof(pwdbuffer);
+	char *pwdbuffer;
+	int  pwdlinelen;
+
+	pwdlinelen = sysconf (_SC_GETPW_R_SIZE_MAX);
+
+	if (pwdlinelen == -1) {
+		pwdlinelen = 256;
+	}
+
+	pwdbuffer = malloc (pwdlinelen);
 
 	if ((getpwnam_r (req_user, pwdptr, pwdbuffer, pwdlinelen, &temp_pwd_pt)) != 0) {
 		log_printf (LOGSYS_LEVEL_ERROR,
@@ -576,8 +590,10 @@ static int uid_determine (const char *req_user)
 			req_user);
 		corosync_exit_error (AIS_DONE_UID_DETERMINE);
 	}
+	pw_uid = passwd.pw_uid;
+	free (pwdbuffer);
 
-	return passwd.pw_uid;
+	return pw_uid;
 }
 
 static int gid_determine (const char *req_group)
@@ -586,8 +602,16 @@ static int gid_determine (const char *req_group)
 	struct group group;
 	struct group * grpptr = &group;
 	struct group * temp_grp_pt;
-	char grpbuffer[200];
-	int  grplinelen = sizeof(grpbuffer);
+	char *grpbuffer;
+	int  grplinelen;
+
+	grplinelen = sysconf (_SC_GETGR_R_SIZE_MAX);
+
+	if (grplinelen == -1) {
+		grplinelen = 256;
+	}
+
+	grpbuffer = malloc (grplinelen);
 
 	if ((getgrnam_r (req_group, grpptr, grpbuffer, grplinelen, &temp_grp_pt)) != 0) {
 		log_printf (LOGSYS_LEVEL_ERROR,
@@ -596,6 +620,8 @@ static int gid_determine (const char *req_group)
 		corosync_exit_error (AIS_DONE_GID_DETERMINE);
 	}
 	ais_gid = group.gr_gid;
+	free (grpbuffer);
+
 	return ais_gid;
 }
 
@@ -610,7 +636,9 @@ static void main_objdb_reload_notify(objdb_reload_notify_type_t type, int flush,
 		/*
 		 * Reload the logsys configuration
 		 */
-		logsys_format_set(NULL);
+		if (logsys_format_set(NULL) == -1) {
+			fprintf (stderr, "Unable to setup logging format.\n");
+		}
 		corosync_main_config_read_logging(global_objdb,
 						  &error_string);
 	}

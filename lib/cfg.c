@@ -203,7 +203,7 @@ corosync_cfg_dispatch (
 		switch (dispatch_data->id) {
 		case MESSAGE_RES_CFG_TESTSHUTDOWN:
 			if (callbacks.corosync_cfg_shutdown_callback == NULL) {
-				continue;
+				break;
 			}
 
 			res_lib_cfg_testshutdown = (struct res_lib_cfg_testshutdown *)dispatch_data;
@@ -272,7 +272,7 @@ corosync_cfg_ring_status_get (
 	struct cfg_instance *cfg_instance;
 	struct req_lib_cfg_ringstatusget req_lib_cfg_ringstatusget;
 	struct res_lib_cfg_ringstatusget res_lib_cfg_ringstatusget;
-	unsigned int i;
+	unsigned int i, j;
 	cs_error_t error;
 	struct iovec iov;
 
@@ -303,7 +303,7 @@ corosync_cfg_ring_status_get (
 	*status = malloc (sizeof (char *) * *interface_count);
 	if (*status == NULL) {
 		error = CS_ERR_NO_MEMORY;
-		goto error_free_interface_names;
+		goto error_free_interface_names_array;
 	}
 	memset (*status, 0, sizeof (char *) * *interface_count);
 
@@ -311,25 +311,33 @@ corosync_cfg_ring_status_get (
 		(*(interface_names))[i] = strdup (res_lib_cfg_ringstatusget.interface_name[i]);
 		if ((*(interface_names))[i] == NULL) {
 			error = CS_ERR_NO_MEMORY;
-			goto error_free_contents;
+			goto error_free_interface_names;
 		}
+	}
+
+	for (i = 0; i < res_lib_cfg_ringstatusget.interface_count; i++) {
 		(*(status))[i] = strdup (res_lib_cfg_ringstatusget.interface_status[i]);
 		if ((*(status))[i] == NULL) {
 			error = CS_ERR_NO_MEMORY;
-			goto error_free_contents;
+			goto error_free_status;
 		}
 	}
 	goto no_error;
 
-error_free_contents:
-	for (i = 0; i < res_lib_cfg_ringstatusget.interface_count; i++) {
-		free (*interface_names + i);
-		free (*status + i);
+error_free_status:
+	for (j = 0; j < i; j++) {
+		free ((*(status))[j]);
 	}
-
-	free (*status);
+	i = *interface_count;
 
 error_free_interface_names:
+	for (j = 0; j < i; j++) {
+		free ((*(interface_names))[j]);
+	}
+	
+	free (*status);
+
+error_free_interface_names_array:
 	free (*interface_names);
 
 no_error:
@@ -643,6 +651,7 @@ cs_error_t corosync_cfg_get_node_addrs (
 	int i;
 	struct iovec iov;
 	void *return_address;
+	const char *addr_buf;
 
 	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle,
 		(void *)&cfg_instance));
@@ -673,7 +682,9 @@ cs_error_t corosync_cfg_get_node_addrs (
 	if (res_lib_cfg_get_node_addrs->family == AF_INET6)
 		addrlen = sizeof(struct sockaddr_in6);
 
-	for (i=0; i<max_addrs && i<res_lib_cfg_get_node_addrs->num_addrs; i++) {
+	for (i = 0, addr_buf = (char *)res_lib_cfg_get_node_addrs->addrs;
+	    i < max_addrs && i<res_lib_cfg_get_node_addrs->num_addrs;
+	    i++, addr_buf += TOTEMIP_ADDRLEN) {
 		struct sockaddr_in *in;
 		struct sockaddr_in6 *in6;
 
@@ -682,12 +693,12 @@ cs_error_t corosync_cfg_get_node_addrs (
 		if (res_lib_cfg_get_node_addrs->family == AF_INET) {
 			in = (struct sockaddr_in *)addrs[i].address;
 			in->sin_family = AF_INET;
-			memcpy(&in->sin_addr, &res_lib_cfg_get_node_addrs->addrs[i][0], sizeof(struct in_addr));
+			memcpy(&in->sin_addr, addr_buf, sizeof(struct in_addr));
 		}
 		if (res_lib_cfg_get_node_addrs->family == AF_INET6) {
 			in6 = (struct sockaddr_in6 *)addrs[i].address;
 			in6->sin6_family = AF_INET6;
-			memcpy(&in6->sin6_addr, &res_lib_cfg_get_node_addrs->addrs[i][0], sizeof(struct in6_addr));
+			memcpy(&in6->sin6_addr, addr_buf, sizeof(struct in6_addr));
 		}
 	}
 	*num_addrs = res_lib_cfg_get_node_addrs->num_addrs;

@@ -41,11 +41,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #include <corosync/hdb.h>
 #include <corosync/totem/coropoll.h>
 #include <corosync/list.h>
 #include "tlist.h"
+#include "util.h"
 
 typedef int (*dispatch_fn_t) (hdb_handle_t hdb_handle, int fd, int revents, void *data);
 
@@ -61,9 +65,16 @@ struct poll_instance {
 	int poll_entry_count;
 	struct timerlist timerlist;
 	int stop_requested;
+	int pipefds[2];
+	poll_low_fds_event_fn low_fds_event_fn;
+	int32_t not_enough_fds;
 };
 
 DECLARE_HDB_DATABASE (poll_instance_database,NULL);
+
+static int dummy_dispatch_fn (hdb_handle_t handle, int fd, int revents, void *data) {
+	return (0);
+}
 
 hdb_handle_t poll_create (void)
 {
@@ -86,8 +97,27 @@ hdb_handle_t poll_create (void)
 	poll_instance->ufds = 0;
 	poll_instance->poll_entry_count = 0;
 	poll_instance->stop_requested = 0;
+	poll_instance->not_enough_fds = 0;
 	timerlist_init (&poll_instance->timerlist);
 
+	res = pipe (poll_instance->pipefds);
+	if (res != 0) {
+		goto error_destroy;
+	}
+
+	/*
+	 * Allow changes in modify to propogate into new poll instance
+	 */
+	res = poll_dispatch_add (
+		handle,
+		poll_instance->pipefds[0],
+		POLLIN,
+		NULL,
+		dummy_dispatch_fn);
+	if (res != 0) {
+		goto error_destroy;
+	}
+		
 	return (handle);
 
 error_destroy:
@@ -220,8 +250,19 @@ int poll_dispatch_modify (
 	 */
 	for (i = 0; i < poll_instance->poll_entry_count; i++) {
 		if (poll_instance->poll_entries[i].ufd.fd == fd) {
+			int change_notify = 0;
+
+			if (poll_instance->poll_entries[i].ufd.events != events) {
+				change_notify = 1;
+			}
 			poll_instance->poll_entries[i].ufd.events = events;
 			poll_instance->poll_entries[i].dispatch_fn = dispatch_fn;
+			if (change_notify) {
+				char buf = 1;
+retry_write:
+				if (write (poll_instance->pipefds[1], &buf, 1) < 0 && errno == EINTR )
+					goto retry_write;
+			}
 
 			goto error_put;
 		}
@@ -347,6 +388,73 @@ error_exit:
 	return (res);
 }
 
+int poll_low_fds_event_set(
+	hdb_handle_t handle,
+	poll_low_fds_event_fn fn)
+{
+	struct poll_instance *poll_instance;
+
+	if (hdb_handle_get (&poll_instance_database, handle,
+		(void *)&poll_instance) != 0) {
+		return -ENOENT;
+	}
+
+	poll_instance->low_fds_event_fn = fn;
+
+	hdb_handle_put (&poll_instance_database, handle);
+	return 0;
+}
+
+/* logs, std(in|out|err), pipe */
+#define POLL_FDS_USED_MISC 50
+
+static void poll_fds_usage_check(struct poll_instance *poll_instance)
+{
+	struct rlimit lim;
+	static int32_t socks_limit = 0;
+	int32_t send_event = 0;
+	int32_t socks_used = 0;
+	int32_t socks_avail = 0;
+	int32_t i;
+
+	if (socks_limit == 0) {
+		if (getrlimit(RLIMIT_NOFILE, &lim) == -1) {
+			perror("getrlimit() failed");
+			return;
+		}
+		socks_limit = lim.rlim_cur;
+		socks_limit -= POLL_FDS_USED_MISC;
+		if (socks_limit < 0) {
+			socks_limit = 0;
+		}
+	}
+
+	for (i = 0; i < poll_instance->poll_entry_count; i++) {
+		if (poll_instance->poll_entries[i].ufd.fd != -1) {
+			socks_used++;
+		}
+	}
+	socks_avail = socks_limit - socks_used;
+	if (socks_avail < 0) {
+		socks_avail = 0;
+	}
+	send_event = 0;
+	if (poll_instance->not_enough_fds) {
+		if (socks_avail > 2) {
+			poll_instance->not_enough_fds = 0;
+			send_event = 1;
+		}
+	} else {
+		if (socks_avail <= 1) {
+			poll_instance->not_enough_fds = 1;
+			send_event = 1;
+		}
+	}
+	if (send_event) {
+		poll_instance->low_fds_event_fn(poll_instance->not_enough_fds,
+			socks_avail);
+	}
+}
 
 int poll_run (
 	hdb_handle_t handle)
@@ -364,11 +472,13 @@ int poll_run (
 	}
 
 	for (;;) {
+rebuild_poll:
 		for (i = 0; i < poll_instance->poll_entry_count; i++) {
 			memcpy (&poll_instance->ufds[i],
 				&poll_instance->poll_entries[i].ufd,
 				sizeof (struct pollfd));
 		}
+		poll_fds_usage_check(poll_instance);
 		expire_timeout_msec = timerlist_msec_duration_to_expire (&poll_instance->timerlist);
 
 		if (expire_timeout_msec != -1 && expire_timeout_msec > 0xFFFFFFFF) {
@@ -388,6 +498,13 @@ retry_poll:
 			goto error_exit;
 		}
 
+		if (poll_instance->ufds[0].revents) {
+			char buf;
+retry_read:
+			if (read (poll_instance->ufds[0].fd, &buf, 1) < 0 && errno == EINTR)
+				goto retry_read;
+			goto rebuild_poll;
+		}
 		poll_entry_count = poll_instance->poll_entry_count;
 		for (i = 0; i < poll_entry_count; i++) {
 			if (poll_instance->ufds[i].fd != -1 &&

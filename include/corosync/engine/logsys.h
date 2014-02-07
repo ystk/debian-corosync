@@ -153,6 +153,32 @@ extern "C" {
 #define LOGSYS_DECODE_RECID(rec_ident) \
 	(((rec_ident) & LOGSYS_RECID_RECID_MASK) >> LOGSYS_SUBSYSID_END)
 
+#define LOGSYS_MAX_PERROR_MSG_LEN	128
+
+#ifdef COROSYNC_LINUX
+/* The GNU version of strerror_r returns a (char*) that *must* be used */
+#define LOGSYS_STRERROR_R(out_ptr, err_num, buffer, sizeof_buffer) \
+	out_ptr = strerror_r(err_num, buffer, sizeof_buffer);
+#else
+/* The XSI-compliant strerror_r() return 0 or -1 (in case the buffer is full) */
+#define LOGSYS_STRERROR_R(out_ptr, err_num, buffer, sizeof_buffer) do {	\
+		if ( strerror_r(err_num, buffer, sizeof_buffer) == 0 ) {		\
+			out_ptr = buffer;											\
+		} else {														\
+			out_ptr = "";												\
+		}																\
+	} while(0)
+#endif
+
+#define LOGSYS_PERROR(err_num, level, fmt, args...) do {							\
+		char _error_str[LOGSYS_MAX_PERROR_MSG_LEN];									\
+		const char *_error_ptr;														\
+		LOGSYS_STRERROR_R(_error_ptr, err_num, _error_str, sizeof(_error_str));		\
+		log_printf(level, fmt ": %s (%d)\n", ##args, _error_ptr, err_num);			\
+	} while(0)
+
+
+
 #ifndef LOGSYS_UTILS_ONLY
 
 extern int _logsys_system_setup(
@@ -167,7 +193,7 @@ extern int _logsys_system_setup(
 extern int _logsys_config_subsys_get (
 	const char *subsys);
 
-extern unsigned int _logsys_subsys_create (const char *subsys);
+extern int _logsys_subsys_create (const char *subsys);
 
 extern int _logsys_rec_init (unsigned int size);
 
@@ -237,15 +263,15 @@ extern char *logsys_format_get (void);
  *
  * Pass a NULL subsystem to change them all
  */
-extern unsigned int logsys_config_syslog_facility_set (
+extern int logsys_config_syslog_facility_set (
 	const char *subsys,
 	unsigned int facility);
 
-extern unsigned int logsys_config_syslog_priority_set (
+extern int logsys_config_syslog_priority_set (
 	const char *subsys,
 	unsigned int priority);
 
-extern unsigned int logsys_config_mode_set (
+extern int logsys_config_mode_set (
 	const char *subsys,
 	unsigned int mode);
 
@@ -262,7 +288,7 @@ extern int logsys_config_file_set (
 	const char **error_string,
 	const char *file);
 
-extern unsigned int logsys_config_logfile_priority_set (
+extern int logsys_config_logfile_priority_set (
 	const char *subsys,
 	unsigned int priority);
 
@@ -271,7 +297,7 @@ extern unsigned int logsys_config_logfile_priority_set (
  * everything is sent everywhere. priority values
  * for file and syslog are not overwritten.
  */
-extern unsigned int logsys_config_debug_set (
+extern int logsys_config_debug_set (
 	const char *subsys,
 	unsigned int value);
 
@@ -316,7 +342,7 @@ static void logsys_system_init (void)					\
 		exit (-1);						\
 	}								\
 									\
-	if (logsys_format_set (format) < 0) {				\
+	if (logsys_format_set (format) == -1) {				\
 		fprintf (stderr,					\
 			"Unable to setup logging format.\n");		\
 		exit (-1);						\
