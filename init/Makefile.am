@@ -34,9 +34,9 @@
 
 MAINTAINERCLEANFILES	= Makefile.in
 
-EXTRA_DIST		= generic.in
+EXTRA_DIST		= generic.in notifyd.in
 
-target_INIT		= generic
+target_INIT		= generic notifyd
 
 %: %.in Makefile
 	rm -f $@-t $@
@@ -57,7 +57,8 @@ clean-local:
 install-exec-local:
 	$(INSTALL) -d $(DESTDIR)/$(INITDDIR)
 	$(INSTALL) -m 755 generic $(DESTDIR)/$(INITDDIR)/corosync
+	$(INSTALL) -m 755 notifyd $(DESTDIR)/$(INITDDIR)/corosync-notifyd
 
 uninstall-local:
 	cd $(DESTDIR)/$(INITDDIR) && \
-		rm -f corosync
+		rm -f corosync corosync-notifyd

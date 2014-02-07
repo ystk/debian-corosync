@@ -36,10 +36,6 @@ typedef uint64_t ulong64;
 #define ENDIAN_LITTLE
 #elif __BYTE_ORDER == __BIG_ENDIAN
 #define ENDIAN_BIG
-#elif _BYTE_ORDER == _LITTLE_ENDIAN
-#define ENDIAN_LITTLE
-#elif _BYTE_ORDER == _BIG_ENDIAN
-#define ENDIAN_BIG
 #else
 #error "cannot detect byte order"
 #endif
@@ -1254,13 +1250,14 @@ static unsigned long rng_nix(unsigned char *buf, unsigned long len,
                              void (*callback)(void))
 {
 	int fd;
-	unsigned long rb;
+	unsigned long rb = 0;
 
 	fd = open ("/dev/urandom", O_RDONLY);
 
-	rb = (unsigned long)read (fd, buf, len);
-
-	close (fd);
+	if (fd >= 0) {
+		rb = (unsigned long)read (fd, buf, len);
+		close (fd);
+	}
 
 	return (rb);
 }
@@ -1317,7 +1314,7 @@ unsigned long rng_get_bytes(unsigned char *buf, unsigned long len,
 int rng_make_prng(int bits, int wprng, prng_state *prng,
                   void (*callback)(void))
 {
-   unsigned char buf[256];
+   unsigned char buf[258];
    int err;
 
    if (bits < 64 || bits > 1024) {

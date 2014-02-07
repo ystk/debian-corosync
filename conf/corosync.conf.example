@@ -10,15 +10,16 @@ totem {
 		bindnetaddr: 192.168.1.1
 		mcastaddr: 226.94.1.1
 		mcastport: 5405
+		ttl: 1
 	}
 }
 
 logging {
 	fileline: off
-	to_stderr: yes
+	to_stderr: no
 	to_logfile: yes
 	to_syslog: yes
-	logfile: /tmp/corosync.log
+	logfile: /var/log/cluster/corosync.log
 	debug: off
 	timestamp: on
 	logger_subsys {

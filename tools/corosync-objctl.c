@@ -56,6 +56,7 @@ typedef enum {
 	ACTION_READ,
 	ACTION_WRITE,
 	ACTION_CREATE,
+	ACTION_CREATE_KEY,
 	ACTION_DELETE,
 	ACTION_PRINT_ALL,
 	ACTION_PRINT_DEFAULT,
@@ -91,6 +92,7 @@ static void tail_object_deleted(confdb_handle_t handle,
 	size_t name_len);
 
 static void create_object(confdb_handle_t handle, char * name_pt);
+static void create_object_key(confdb_handle_t handle, char * name_pt);
 static void write_key(confdb_handle_t handle, char * path_pt);
 static void get_parent_name(const char * name_pt, char * parent_name);
 
@@ -101,7 +103,28 @@ static confdb_callbacks_t callbacks = {
 };
 
 static int debug = 0;
+static int show_binary = 0;
 static int action;
+
+static void print_binary_key (char *value, size_t value_len)
+{
+	size_t i;
+	char c;
+
+	for (i = 0; i < value_len; i++) {
+		c = value[i];
+		if (c >= ' ' && c < 0x7f && c != '\\') {
+			fputc (c, stdout);
+		} else {
+			if (c == '\\') {
+				printf ("\\\\");
+			} else {
+				printf ("\\x%02X", c);
+			}
+		}
+	}
+	printf ("\n");
+}
 
 static void print_key (char *key_name, void *value, size_t value_len, confdb_value_types_t type)
 {
@@ -130,12 +153,25 @@ static void print_key (char *key_name, void *value, size_t value_len, confdb_val
 			printf ("%s=%"PRIu64"\n", key_name,
 					  *(uint64_t*)value);
 			break;
+		case CONFDB_VALUETYPE_FLOAT:
+			printf ("%s=%f\n", key_name,
+					  *(float*)value);
+			break;
+		case CONFDB_VALUETYPE_DOUBLE:
+			printf ("%s=%f\n", key_name,
+					  *(double*)value);
+			break;
 		case CONFDB_VALUETYPE_STRING:
 			printf ("%s=%s\n", key_name, (char*)value);
 			break;
 		default:
 		case CONFDB_VALUETYPE_ANY:
-			printf ("%s=**binary**(%d)\n", key_name, type);
+			if (!show_binary) {
+				printf ("%s=**binary**(%d)\n", key_name, type);
+			} else {
+				printf ("%s=", key_name);
+				print_binary_key ((char *)value, value_len);
+			}
 			break;
 	}
 }
@@ -302,12 +338,13 @@ static int print_all(void)
 static int print_help(void)
 {
 	printf("\n");
-	printf ("usage:  corosync-objctl object%ckey ...                    Print an object\n", SEPERATOR);
+	printf ("usage:  corosync-objctl [-b] object%ckey ...               Print an object\n", SEPERATOR);
 	printf ("        corosync-objctl -c object%cchild_obj ...           Create Object\n", SEPERATOR);
 	printf ("        corosync-objctl -d object%cchild_obj ...           Delete object\n", SEPERATOR);
 	printf ("        corosync-objctl -w object%cchild_obj.key=value ... Create a key\n", SEPERATOR);
+	printf ("        corosync-objctl -n object%cchild_obj.key=value ... Create a new object with the key\n", SEPERATOR);
 	printf ("        corosync-objctl -t object%cchild_obj ...           Track changes\n", SEPERATOR);
-	printf ("        corosync-objctl -a                                Print all objects\n");
+	printf ("        corosync-objctl [-b] -a                           Print all objects\n");
 	printf ("        corosync-objctl -p <filename> Load in config from the specified file.\n");
 	printf("\n");
 	return 0;
@@ -395,7 +432,8 @@ static cs_error_t find_object (confdb_handle_t handle,
 	char tmp_name[OBJ_NAME_SIZE];
 	cs_error_t res = CS_OK;
 
-	strncpy (tmp_name, name_pt, OBJ_NAME_SIZE);
+	strncpy (tmp_name, name_pt, sizeof (tmp_name));
+	tmp_name[sizeof (tmp_name) - 1] = '\0';
 	obj_name_pt = strtok_r(tmp_name, SEPERATOR_STR, &save_pt);
 
 	while (obj_name_pt != NULL) {
@@ -505,7 +543,8 @@ static void create_object(confdb_handle_t handle, char * name_pt)
 	char tmp_name[OBJ_NAME_SIZE];
 	cs_error_t res;
 
-	strncpy (tmp_name, name_pt, OBJ_NAME_SIZE);
+	strncpy (tmp_name, name_pt, sizeof (tmp_name));
+	tmp_name[sizeof (tmp_name) - 1] = '\0';
 	obj_name_pt = strtok_r(tmp_name, SEPERATOR_STR, &save_pt);
 
 	while (obj_name_pt != NULL) {
@@ -539,6 +578,79 @@ static void create_object(confdb_handle_t handle, char * name_pt)
 
 		parent_object_handle = obj_handle;
 		obj_name_pt = strtok_r (NULL, SEPERATOR_STR, &save_pt);
+	}
+}
+
+static void create_object_key(confdb_handle_t handle, char *name_pt)
+{
+	char * obj_name_pt;
+	char * new_obj_name_pt;
+	char * save_pt;
+	hdb_handle_t obj_handle;
+	hdb_handle_t parent_object_handle = OBJECT_PARENT_HANDLE;
+	char tmp_name[OBJ_NAME_SIZE];
+	cs_error_t res;
+	char parent_name[OBJ_NAME_SIZE];
+	char key_name[OBJ_NAME_SIZE];
+	char key_value[OBJ_NAME_SIZE];
+
+	get_parent_name(name_pt, parent_name);
+	get_key(name_pt, key_name, key_value);
+
+	strncpy (tmp_name, parent_name, sizeof (tmp_name));
+	tmp_name[sizeof (tmp_name) - 1] = '\0';
+	obj_name_pt = strtok_r(tmp_name, SEPERATOR_STR, &save_pt);
+
+	/*
+	 * Create parent object tree
+	 */
+	while (obj_name_pt != NULL) {
+		res = confdb_object_find_start(handle, parent_object_handle);
+		if (res != CS_OK) {
+			fprintf (stderr, "Could not start object_find %d\n", res);
+			exit (EXIT_FAILURE);
+		}
+
+		new_obj_name_pt = strtok_r (NULL, SEPERATOR_STR, &save_pt);
+		res = confdb_object_find(handle, parent_object_handle,
+			 obj_name_pt, strlen (obj_name_pt), &obj_handle);
+		if (res != CS_OK || new_obj_name_pt == NULL) {
+
+			if (validate_name(obj_name_pt) != CS_OK) {
+				fprintf(stderr, "Incorrect object name \"%s\", \"=\" not allowed.\n",
+						obj_name_pt);
+				exit(EXIT_FAILURE);
+			}
+
+			if (debug)
+				printf ("%s:%d: %s\n", __func__,__LINE__, obj_name_pt);
+			res = confdb_object_create (handle,
+				parent_object_handle,
+				obj_name_pt,
+				strlen (obj_name_pt),
+				&obj_handle);
+			if (res != CS_OK) {
+				fprintf(stderr, "Failed to create object \"%s\". Error %d.\n",
+					obj_name_pt, res);
+			}
+		}
+		parent_object_handle = obj_handle;
+		obj_name_pt = new_obj_name_pt;
+	}
+
+	/*
+	 * Create key
+	 */
+	res = confdb_key_create_typed (handle,
+		obj_handle,
+		key_name,
+		key_value,
+		strlen(key_value),
+		CONFDB_VALUETYPE_STRING);
+	if (res != CS_OK) {
+		fprintf(stderr,
+			"Failed to create the key %s=%s. Error %d\n",
+			key_name, key_value, res);
 	}
 }
 
@@ -716,7 +828,7 @@ int main (int argc, char *argv[]) {
 	action = ACTION_READ;
 
 	for (;;){
-		c = getopt (argc,argv,"hawcvdtp:");
+		c = getopt (argc,argv,"habwncvdtp:");
 		if (c==-1) {
 			break;
 		}
@@ -730,6 +842,9 @@ int main (int argc, char *argv[]) {
 			case 'a':
 				action = ACTION_PRINT_ALL;
 				break;
+			case 'b':
+				show_binary++;
+				break;
 			case 'p':
 				return read_in_config_file (optarg);
 				break;
@@ -741,6 +856,9 @@ int main (int argc, char *argv[]) {
 				break;
 			case 'w':
 				action = ACTION_WRITE;
+				break;
+			case 'n':
+				action = ACTION_CREATE_KEY;
 				break;
 			case 't':
 				action = ACTION_TRACK;
@@ -776,6 +894,9 @@ int main (int argc, char *argv[]) {
 				break;
 			case ACTION_CREATE:
 				create_object(handle, argv[optind++]);
+				break;
+			case ACTION_CREATE_KEY:
+				create_object_key(handle, argv[optind++]);
 				break;
 			case ACTION_DELETE:
 				delete_object(handle, argv[optind++]);

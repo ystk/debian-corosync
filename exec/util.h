@@ -44,24 +44,48 @@
 extern cs_time_t clust_time_now(void);
 
 enum e_ais_done {
-	AIS_DONE_EXIT = -1,
-	AIS_DONE_UID_DETERMINE = -2,
-	AIS_DONE_GID_DETERMINE = -3,
-	AIS_DONE_MEMPOOL_INIT = -4,
-	AIS_DONE_FORK = -5,
-	AIS_DONE_LIBAIS_SOCKET = -6,
-	AIS_DONE_LIBAIS_BIND = -7,
-	AIS_DONE_READKEY = -8,
-	AIS_DONE_MAINCONFIGREAD = -9,
-	AIS_DONE_LOGSETUP = -10,
-	AIS_DONE_AMFCONFIGREAD = -11,
-	AIS_DONE_DYNAMICLOAD = -12,
-	AIS_DONE_OBJDB = -13,
-	AIS_DONE_INIT_SERVICES = -14,
-	AIS_DONE_OUT_OF_MEMORY = -15,
-	AIS_DONE_FATAL_ERR = -16,
-	AIS_DONE_DIR_NOT_PRESENT = -17
+	AIS_DONE_EXIT = 0,
+	AIS_DONE_UID_DETERMINE = 1,
+	AIS_DONE_GID_DETERMINE = 2,
+	AIS_DONE_MEMPOOL_INIT = 3,
+	AIS_DONE_FORK = 4,
+	AIS_DONE_LIBAIS_SOCKET = 5,
+	AIS_DONE_LIBAIS_BIND = 6,
+	AIS_DONE_READKEY = 7,
+	AIS_DONE_MAINCONFIGREAD = 8,
+	AIS_DONE_LOGSETUP = 9,
+	AIS_DONE_AMFCONFIGREAD = 10,
+	AIS_DONE_DYNAMICLOAD = 11,
+	AIS_DONE_OBJDB = 12,
+	AIS_DONE_INIT_SERVICES = 13,
+	AIS_DONE_OUT_OF_MEMORY = 14,
+	AIS_DONE_FATAL_ERR = 15,
+	AIS_DONE_DIR_NOT_PRESENT = 16,
+	AIS_DONE_AQUIRE_LOCK = 17,
+	AIS_DONE_ALREADY_RUNNING = 18,
+	AIS_DONE_STD_TO_NULL_REDIR = 19,
 };
+
+static inline cs_error_t hdb_error_to_cs (int res)		\
+{								\
+	if (res == 0) {						\
+		return (CS_OK);					\
+	} else {						\
+		if (errno == EBADF) {				\
+			return (CS_ERR_BAD_HANDLE);		\
+		} else						\
+		if (errno == ENOMEM) {				\
+			return (CS_ERR_NO_MEMORY);		\
+		} else						\
+		if (errno == EMFILE) {				\
+			return (CS_ERR_NO_RESOURCES);		\
+		} else						\
+		if (errno == EACCES) {				\
+			return (CS_ERR_SECURITY);		\
+		}						\
+		return (CS_ERR_LIBRARY);			\
+	}							\
+}
 
 /*
  * Compare two names.  returns non-zero on match.
@@ -69,10 +93,15 @@ enum e_ais_done {
 extern int name_match(cs_name_t *name1, cs_name_t *name2);
 #define corosync_exit_error(err) _corosync_exit_error ((err), __FILE__, __LINE__)
 extern void _corosync_exit_error (enum e_ais_done err, const char *file,
-				  unsigned int line)
-  __attribute__((__noreturn__));
-void _corosync_out_of_memory_error (void) __attribute__((__noreturn__));
+				  unsigned int line) __attribute__((noreturn));
+void _corosync_out_of_memory_error (void) __attribute__((noreturn));
 extern char *getcs_name_t (cs_name_t *name);
 extern void setcs_name_t (cs_name_t *name, char *str);
 extern int cs_name_tisEqual (cs_name_t *str1, char *str2);
+/**
+ * Get the short name of a service from the service_id.
+ */
+const char * short_service_name_get(uint32_t service_id,
+				    char *buf, size_t buf_size);
+
 #endif /* UTIL_H_DEFINED */

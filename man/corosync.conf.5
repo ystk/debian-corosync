@@ -1,6 +1,6 @@
 .\"/*
 .\" * Copyright (c) 2005 MontaVista Software, Inc.
-.\" * Copyright (c) 2006-2009 Red Hat, Inc.
+.\" * Copyright (c) 2006-2010 Red Hat, Inc.
 .\" *
 .\" * All rights reserved.
 .\" *
@@ -77,7 +77,8 @@ option which is required:
 .PP
 Within the
 .B interface
-sub-directive of totem there are four parameters which are required:
+sub-directive of totem there are four parameters which are required.  There is
+one parameter which is optional.
 
 .TP
 ringnumber
@@ -88,9 +89,11 @@ ring. The ringnumber must start at 0.
 
 .TP
 bindnetaddr
-This specifies the address which the corosync executive should bind.
-This address should always end in zero.  If the totem traffic should
-be routed over 192.168.5.92, set bindnetaddr to 192.168.5.0.
+This specifies the network address the corosync executive should bind
+to.  For example, if the local interface is 192.168.5.92 with netmask
+255.255.255.0, set bindnetaddr to 192.168.5.0.  If the local interface
+is 192.168.5.92 with netmask 255.255.255.192, set bindnetaddr to
+192.168.5.64, and so forth.
 
 This may also be an IPV6 address, in which case IPV6 networking will be used.
 In this case, the full address must be specified and there is no automatic
@@ -119,6 +122,24 @@ mcastport
 This specifies the UDP port number.  It is possible to use the same multicast
 address on a network with the corosync services configured for different
 UDP ports.
+Please note corosync uses two UDP ports mcastport (for mcast receives) and 
+mcastport - 1 (for mcast sends).
+If you have multiple clusters on the same network using the same mcastaddr 
+please configure the mcastports with a gap.
+
+.TP
+ttl
+This specifies the Time To Live (TTL). If you run your cluster on a routed
+network then the default of "1" will be too small. This option provides
+a way to increase this up to 255. The valid range is 0..255.
+Note that this is only valid on multicast transport types.
+
+.TP
+member
+This specifies a member on the interface and used with the udpu transport only.
+Every node that should be a member of the membership should be specified as
+a separate member directive.  Within the member directive there is a parameter
+memberaddr which specifies the ip address of one of the nodes.
 
 .PP
 .PP
@@ -252,11 +273,13 @@ The default is ykd.  The vsftype can also be set to none.
 .TP
 transport
 This directive controls the transport mechanism used.  If the interface to
-which corosync is binding is Infiniband, you can specify the "iba" option.  Any
-other option is ignored.  Note Infiniband interfaces will use RDMA transport
-techniques and perform at higher bandwidths and lower latency than gige networks.
+which corosync is binding is an RDMA interface such as RoCEE or Infiniband, the
+"iba" parameter may be specified.  To avoid the use of multicast entirely, a
+unicast transport parameter "udpu" can be specified.  This requires specifying
+the list of members that could potentially make up the membership before
+deployment.
 
-The default is udp.  The transport type can also be set to iba.
+The default is udp.  The transport type can also be set to udpu or iba.
 
 Within the
 .B totem
@@ -327,6 +350,12 @@ achieved before starting a new round of membership configuration.  The minimum
 value for consensus must be 1.2 * token.  This value will be automatically
 calculated at 1.2 * token if the user doesn't specify a consensus value.
 
+For two node clusters, a consensus larger then the join timeout but less then
+token is safe.  For three node or larger clusters, consensus should be larger
+then token.  There is an increasing risk of odd membership changes, which stil
+guarantee virtual synchrony,  as node count grows if consensus is less than
+token.
+
 The default is 1200 milliseconds.
 
 .TP
@@ -346,12 +375,12 @@ that a network interface is back up after it has been downed.
 The default is 1000 millseconds.
 
 .TP
-fail_to_recv_const
+fail_recv_const
 This constant specifies how many rotations of the token without receiving any
 of the messages when messages should be received may occur before a new
 configuration is formed.
 
-The default is 50 failures to receive a message.
+The default is 2500 failures to receive a message.
 
 .TP
 seqno_unchanged_const
@@ -410,6 +439,16 @@ processor on receipt of the token.  The max_messages parameter is limited to
 The default is 17 messages.
 
 .TP
+miss_count_const
+This constant defines the maximum number of times on receipt of a token
+a message is checked for retransmission before a retransmission occurs.  This
+parameter is useful to modify for switches that delay multicast packets
+compared to unicast packets.  The default setting works well for nearly all
+modern switches.
+
+The default is 5 messages.
+
+.TP
 rrp_problem_count_timeout
 This specifies the time in milliseconds to wait before decrementing the
 problem count by 1 for a particular ring to ensure a link is not marked
@@ -433,6 +472,14 @@ may occur.
 The default is 10 problem counts.
 
 .TP
+rrp_problem_count_mcast_threshold
+This specifies the number of times a problem is detected with multicast before
+setting the link faulty for passive rrp mode. This variable is unused in active
+rrp mode.
+
+The default is 10 times rrp_problem_count_threshold.
+
+.TP
 rrp_token_expired_timeout
 This specifies the time in milliseconds to increment the problem counter for
 the redundant ring protocol after not having received a token from all rings
@@ -443,6 +490,13 @@ problem_count_threshold but may be overridden.  It is not recommended to
 override this value without guidance from the corosync community.
 
 The default is 47 milliseconds.
+
+.TP
+rrp_autorecovery_check_timeout
+This specifies the time in milliseconds to check if the failed ring can be
+auto-recovered.
+
+The default is 1000 milliseconds.
 
 .PP
 Within the

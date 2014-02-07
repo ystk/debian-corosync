@@ -34,6 +34,7 @@
 
 #include <config.h>
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -132,12 +133,32 @@ static void ConfchgCallback (
 	}
 }
 
-static cpg_callbacks_t callbacks = {
+static void TotemConfchgCallback (
+	cpg_handle_t handle,
+        struct cpg_ring_id ring_id,
+        uint32_t member_list_entries,
+        const uint32_t *member_list)
+{
+	int i;
+
+	printf("\nTotemConfchgCallback: ringid (%u.%"PRIu64")\n", ring_id.nodeid, ring_id.seq);
+
+	printf("active processors %lu: ",
+	       (unsigned long int) member_list_entries);
+	for (i=0; i<member_list_entries; i++) {
+		printf("%d ", member_list[i]);
+	}
+	printf ("\n");
+}
+
+static cpg_model_v1_data_t model_data = {
 	.cpg_deliver_fn =            DeliverCallback,
 	.cpg_confchg_fn =            ConfchgCallback,
+	.cpg_totem_confchg_fn =      TotemConfchgCallback,
+	.flags =                     CPG_MODEL_V1_DELIVER_INITIAL_TOTEM_CONF,
 };
 
-static void sigintr_handler (int signum) __attribute__((__noreturn__));
+static void sigintr_handler (int signum) __attribute__((noreturn));
 static void sigintr_handler (int signum) {
 	exit (0);
 }
@@ -152,6 +173,9 @@ int main (int argc, char *argv[]) {
 	int opt;
 	unsigned int nodeid;
 	char *fgets_res;
+	struct cpg_address member_list[64];
+	int member_list_entries;
+	int i;
 
 	while ( (opt = getopt(argc, argv, options)) != -1 ) {
 		switch (opt) {
@@ -170,7 +194,7 @@ int main (int argc, char *argv[]) {
 		group_name.length = 6;
 	}
 
-	result = cpg_initialize (&handle, &callbacks);
+	result = cpg_model_initialize (&handle, CPG_MODEL_V1, (cpg_model_data_t *)&model_data, NULL);
 	if (result != CS_OK) {
 		printf ("Could not initialize Cluster Process Group API instance error %d\n", result);
 		exit (1);
@@ -187,6 +211,21 @@ int main (int argc, char *argv[]) {
 		printf ("Could not join process group, error %d\n", result);
 		exit (1);
 	}
+
+	sleep (1);
+	result = cpg_membership_get (handle, &group_name,
+		(struct cpg_address *)&member_list, &member_list_entries);
+	if (result != CS_OK) {
+		printf ("Could not get current membership list %d\n", result);
+		exit (1);
+	}
+
+	printf ("membership list\n");
+	for (i = 0; i < member_list_entries; i++) {
+		printf ("node id %d pid %d\n", member_list[i].nodeid,
+			member_list[i].pid);
+	}
+
 
 	FD_ZERO (&read_fds);
 	cpg_fd_get(handle, &select_fd);
