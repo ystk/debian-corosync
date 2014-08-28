@@ -364,6 +364,16 @@ printf ("couldn't find totem handle\n");
 
 		objdb_get_int (objdb, object_interface_handle, "ringnumber", &ringnumber);
 
+
+		if (ringnumber >= INTERFACE_MAX) {
+			snprintf (error_string_response, sizeof(error_string_response),
+			    "parse error in config: interface ring number %u is bigger then allowed maximum %u\n",
+			    ringnumber, INTERFACE_MAX - 1);
+
+			*error_string = error_string_response;
+			return -1;
+		}
+
 		/*
 		 * Get interface multicast address
 		 */
@@ -421,6 +431,7 @@ printf ("couldn't find totem handle\n");
 		}
 		totem_config->interfaces[ringnumber].member_count = member_count;
 		totem_config->interface_count++;
+		objdb->object_find_destroy (object_find_member_handle);
 	}
 
 	objdb->object_find_destroy (object_find_interface_handle);

@@ -346,6 +346,7 @@ _cs_confdb_find_object (confdb_handle_t handle,
 		if (res != CS_OK) {
 			return res;
 		}
+		confdb_object_find_destroy(handle, parent_object_handle);
 
 		parent_object_handle = obj_handle;
 		obj_name_pt = strtok_r (NULL, SEPERATOR_STR, &save_pt);
@@ -423,7 +424,14 @@ static void
 _cs_dbus_auto_flush(void)
 {
 	dbus_connection_ref(db);
-	dbus_connection_read_write(db, 500);
+	while (dbus_connection_get_dispatch_status(db) == DBUS_DISPATCH_DATA_REMAINS) {
+		dbus_connection_dispatch(db);
+	}
+
+	while (dbus_connection_has_messages_to_send(db)) {
+		dbus_connection_flush(db);
+	}
+
 	dbus_connection_unref(db);
 }
 

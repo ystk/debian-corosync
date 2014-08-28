@@ -3,12 +3,16 @@
 # Uncomment this to turn on verbose mode.
 # export DH_VERBOSE=1
 
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+
 STAMPS_DIR = debian/stamps
 
 export COROSYNC_BUILD=$(if $(findstring debug,$(DEB_BUILD_OPTIONS)),DEBUG,RELEASE)
 
 configure-stamp:
 	dh_testdir
+	dh_autoreconf
 	./configure --prefix=/usr \
 		    --libexecdir=/usr/lib/ \
 		    --localstatedir=/var \
@@ -26,6 +30,7 @@ build-stamp:
 clean:
 	dh_testdir
 	[ ! -f Makefile ] || $(MAKE) distclean
+	dh_autoreconf_clean
 	dh_clean configure-stamp
 
 install: build
@@ -40,6 +45,8 @@ install: build
 	dh_installdocs
 	dh_installexamples
 	dh_installinit -p corosync -- defaults 19 1
+	dh_installinit -p corosync --name=corosync-notifyd --no-start -- defaults 30 1
+
 	dh_installlogrotate
 	dh_strip --dbg-package=corosync-dbg
 ifeq (,$(findstring nostrip,$(DEB_BUILD_OPTIONS)))

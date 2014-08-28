@@ -1,3 +1,41 @@
+corosync (1.4.6-1.1) unreleased; urgency=low
+
+  * Non-maintainer upload.
+  * Use autotools-dev in build for new architectures (Closes: #743243)
+
+ -- Wookey <wookey@debian.org>  Mon, 31 Mar 2014 18:17:42 +0000
+
+corosync (1.4.6-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Martin Loschwitz <madkiss@debian.org>  Wed, 20 Nov 2013 11:36:52 +0000
+
+corosync (1.4.4-3) unstable; urgency=low
+
+  * debian/corosync.corosync-notifyd.init: Add the "-l" parameter to the
+    command line to make sure that the daemon starts up (Closes: #685060)
+  * debian/rules: Make sure that corosync-notifyd is not automatically
+    started at package installation or upgrade (it will refuse to start
+    if Corosync is not running, which will make the package installation
+    fail on systems where Corosync is installed for the first time)
+
+ -- Martin Loschwitz <madkiss@debian.org>  Tue, 09 Oct 2012 09:19:26 +0000
+
+corosync (1.4.4-2) unstable; urgency=low
+
+  * [19ea126] Fix update-rc.d installation in postinst (Closes: #685060)
+
+ -- Guido Günther <agx@sigxcpu.org>  Thu, 06 Sep 2012 09:10:31 +0200
+
+corosync (1.4.4-1) unstable; urgency=low
+
+  * New upstream release
+  * enable hardened builds in debian/rules 
+  * Added init-script for notifyd
+
+ -- Martin Loschwitz <madkiss@debian.org>  Tue, 14 Aug 2012 16:05:54 +0000
+
 corosync (1.4.2-3) unstable; urgency=low
 
   [ Martin Loschwitz ]
