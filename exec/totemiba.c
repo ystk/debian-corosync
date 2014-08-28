@@ -97,6 +97,8 @@ struct totemiba_instance {
 
 	struct totem_config *totem_config;
 
+	totemsrp_stats_t *stats;
+
 	void (*totemiba_iface_change_fn) (
 		void *context,
 		const struct totem_ip_address *iface_address);
@@ -1267,6 +1269,7 @@ int totemiba_initialize (
 	hdb_handle_t poll_handle,
 	void **iba_context,
 	struct totem_config *totem_config,
+	totemsrp_stats_t *stats,
 	int interface_no,
 	void *context,
 
@@ -1296,6 +1299,8 @@ int totemiba_initialize (
 
 	instance->totemiba_poll_handle = poll_handle;
 
+	instance->totem_interface->bindnet.nodeid = totem_config->node_id;
+
 	instance->totemiba_deliver_fn = deliver_fn;
 
 	instance->totemiba_target_set_completed = target_set_completed;
@@ -1303,6 +1308,7 @@ int totemiba_initialize (
 	instance->totemiba_iface_change_fn = iface_change_fn;
 
 	instance->totem_config = totem_config;
+	instance->stats = stats;
 
 	instance->rrp_context = context;
 

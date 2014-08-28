@@ -61,15 +61,20 @@ dist_man_MANS = \
 	confdb_initialize.3 \
 	confdb_key_create.3 \
 	confdb_key_delete.3 \
+	confdb_key_get.3 \
 	confdb_key_iter.3 \
+	confdb_key_iter_start.3 \
 	confdb_key_replace.3 \
 	confdb_object_create.3 \
 	confdb_object_destroy.3 \
 	confdb_object_find.3 \
+	confdb_object_find_start.3 \
 	confdb_object_iter.3 \
+	confdb_object_iter_start.3 \
 	confdb_object_parent_get.3 \
 	confdb_context_get.3 \
 	confdb_context_set.3 \
+	confdb_keys.8 \
 	cpg_context_get.3 \
 	cpg_context_set.3 \
 	cpg_dispatch.3 \
