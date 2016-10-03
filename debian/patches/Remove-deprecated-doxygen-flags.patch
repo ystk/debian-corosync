@@ -1,0 +1,73 @@
+From: Richard B Winters <rik@mmogp.com>
+Date: Thu, 23 Apr 2015 18:35:22 -0400
+Subject: Remove deprecated doxygen flags
+
+Running 'doxygen -u Doxyfile.in' in the source root produces the
+following results:
+
+ - SYMBOL_CACHE_SIZE at line 301 has become obsolete. This tag
+   has been removed.
+ - SHOW_DIRECTORIES at line 507 has become obsolete. This tag
+   has been removed.
+ - HTML_ALIGN_MEMBERS at line 881 has become obsolete. This tag
+   has been removed.
+ - USE_INLINE_TREES at line 1067 has become obsolete. This tag
+   has been removed.
+ - XML_SCHEMA at line 1311 has become obsolete. This tag has been
+   removed.
+ - XML_DTD at line 1317 has become obsolete. This tag has been
+   removed.
+---
+ Doxyfile.in | 6 ------
+ 1 file changed, 6 deletions(-)
+
+diff --git a/Doxyfile.in b/Doxyfile.in
+index d300fc8..5b84dec 100644
+--- a/Doxyfile.in
++++ b/Doxyfile.in
+@@ -298,7 +298,6 @@ TYPEDEF_HIDES_STRUCT   = NO
+ # 2^(16+SYMBOL_CACHE_SIZE). The valid range is 0..9, the default is 0,
+ # corresponding to a cache size of 2^16 = 65536 symbols
+ 
+-SYMBOL_CACHE_SIZE      = 0
+ 
+ #---------------------------------------------------------------------------
+ # Build related configuration options
+@@ -504,7 +503,6 @@ SHOW_USED_FILES        = YES
+ # then setting the SHOW_DIRECTORIES tag to YES will show the directory hierarchy
+ # in the documentation. The default is NO.
+ 
+-SHOW_DIRECTORIES       = NO
+ 
+ # Set the SHOW_FILES tag to NO to disable the generation of the Files page.
+ # This will remove the Files entry from the Quick Index and from the
+@@ -878,7 +876,6 @@ HTML_TIMESTAMP         = YES
+ # files or namespaces will be aligned in HTML using tables. If set to
+ # NO a bullet list will be used.
+ 
+-HTML_ALIGN_MEMBERS     = YES
+ 
+ # If the HTML_DYNAMIC_SECTIONS tag is set to YES then the generated HTML
+ # documentation will contain sections that can be hidden and shown after the
+@@ -1064,7 +1061,6 @@ GENERATE_TREEVIEW      = NO
+ # By enabling USE_INLINE_TREES, doxygen will generate the Groups, Directories,
+ # and Class Hierarchy pages using a tree view instead of an ordered list.
+ 
+-USE_INLINE_TREES       = NO
+ 
+ # If the treeview is enabled (see GENERATE_TREEVIEW) then this tag can be
+ # used to set the initial width (in pixels) of the frame in which the tree
+@@ -1308,13 +1304,11 @@ XML_OUTPUT             = xml
+ # which can be used by a validating XML parser to check the
+ # syntax of the XML files.
+ 
+-XML_SCHEMA             =
+ 
+ # The XML_DTD tag can be used to specify an XML DTD,
+ # which can be used by a validating XML parser to check the
+ # syntax of the XML files.
+ 
+-XML_DTD                =
+ 
+ # If the XML_PROGRAMLISTING tag is set to YES Doxygen will
+ # dump the program listings (including syntax highlighting

@@ -1,0 +1,8 @@
+#!/usr/bin/dh-exec
+
+etc/dbus-1/system.d/corosync-signals.conf
+etc/init/corosync-notifyd.conf
+lib/systemd/system/corosync-notifyd.service [linux-any]
+usr/sbin/corosync-notifyd
+usr/share/man/man8/corosync-notifyd.8
+usr/share/snmp/mibs/COROSYNC-MIB.txt

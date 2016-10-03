@@ -1,0 +1,4 @@
+# The daemons are not co-installable, so the debug package can't be either.
+# The correct solution would be separate debug packages for each library- and
+# daemon package, but this will do until we have automatic debug packages.
+debug-package-for-multi-arch-same-pkg-not-coinstallable corosync-dbg => lib*

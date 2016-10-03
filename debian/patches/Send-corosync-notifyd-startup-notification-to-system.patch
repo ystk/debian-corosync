@@ -1,0 +1,68 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@niif.hu>
+Date: Sun, 27 Sep 2015 19:19:30 +0200
+Subject: Send corosync-notifyd startup notification to systemd
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Ferenc Wágner <wferi@niif.hu>
+---
+ init/corosync-notifyd.service.in | 2 +-
+ tools/Makefile.am                | 3 ++-
+ tools/corosync-notifyd.c         | 8 ++++++++
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/init/corosync-notifyd.service.in b/init/corosync-notifyd.service.in
+index 94c03c3..15d6da4 100644
+--- a/init/corosync-notifyd.service.in
++++ b/init/corosync-notifyd.service.in
+@@ -7,7 +7,7 @@ After=corosync.service
+ EnvironmentFile=-@SYSCONFDIR@/sysconfig/corosync-notifyd
+ EnvironmentFile=-@SYSCONFDIR@/default/corosync-notifyd
+ ExecStart=@SBINDIR@/corosync-notifyd -f $OPTIONS
+-Type=simple
++Type=notify
+ Restart=always
+ 
+ [Install]
+diff --git a/tools/Makefile.am b/tools/Makefile.am
+index 4eb801a..9e67456 100644
+--- a/tools/Makefile.am
++++ b/tools/Makefile.am
+@@ -67,8 +67,9 @@ corosync_quorumtool_LDADD = $(LIBQB_LIBS) \
+ 			    $(top_builddir)/lib/libquorum.la \
+ 			    $(top_builddir)/lib/libvotequorum.la
+ 
+-corosync_notifyd_CFLAGS   = $(DBUS_CFLAGS)
++corosync_notifyd_CFLAGS   = $(DBUS_CFLAGS) $(libsystemd_CFLAGS)
+ corosync_notifyd_LDADD    = $(LIBQB_LIBS) $(DBUS_LIBS) $(SNMP_LIBS) \
++			    $(libsystemd_LIBS) \
+ 			    $(top_builddir)/lib/libcmap.la \
+ 			    $(top_builddir)/lib/libcfg.la \
+ 			    $(top_builddir)/lib/libquorum.la
+diff --git a/tools/corosync-notifyd.c b/tools/corosync-notifyd.c
+index 783c637..0c3a9db 100644
+--- a/tools/corosync-notifyd.c
++++ b/tools/corosync-notifyd.c
+@@ -62,6 +62,10 @@
+ #include <corosync/quorum.h>
+ #include <corosync/cmap.h>
+ 
++#ifdef HAVE_LIBSYSTEMD
++#include <systemd/sd-daemon.h>
++#endif
++
+ /*
+  * generic declarations
+  */
+@@ -1206,6 +1210,10 @@ main(int argc, char *argv[])
+ 			   sig_exit_handler,
+ 			   NULL);
+ 
++#ifdef HAVE_LIBSYSTEMD
++	sd_notify (0, "READY=1");
++#endif
++
+ 	qb_loop_run(main_loop);
+ 
+ #ifdef HAVE_DBUS

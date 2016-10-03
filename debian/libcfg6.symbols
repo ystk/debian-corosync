@@ -1,0 +1,15 @@
+libcfg.so.6 libcfg6 #MINVER#
+* Build-Depends-Package: libcfg-dev
+ COROSYNC_CFG_0.82@COROSYNC_CFG_0.82 1.99.9
+ corosync_cfg_dispatch@COROSYNC_CFG_0.82 1.99.9
+ corosync_cfg_fd_get@COROSYNC_CFG_0.82 1.99.9
+ corosync_cfg_finalize@COROSYNC_CFG_0.82 1.99.9
+ corosync_cfg_get_node_addrs@Base 1.99.9
+ corosync_cfg_initialize@COROSYNC_CFG_0.82 1.99.9
+ corosync_cfg_kill_node@Base 1.99.9
+ corosync_cfg_local_get@Base 1.99.9
+ corosync_cfg_reload_config@Base 2.3.3
+ corosync_cfg_replyto_shutdown@Base 1.99.9
+ corosync_cfg_ring_reenable@COROSYNC_CFG_0.82 1.99.9
+ corosync_cfg_ring_status_get@COROSYNC_CFG_0.82 1.99.9
+ corosync_cfg_try_shutdown@Base 1.99.9

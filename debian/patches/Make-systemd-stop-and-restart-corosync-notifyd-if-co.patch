@@ -1,0 +1,37 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@niif.hu>
+Date: Sun, 27 Sep 2015 19:04:33 +0200
+Subject: Make systemd stop and restart corosync-notifyd if corosync is
+ restarted
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Otherwise is exits successfully (which should be fixed eventually), thus
+it does not even get restarted by systemd.
+
+Signed-off-by: Ferenc Wágner <wferi@niif.hu>
+---
+ init/corosync-notifyd.service.in | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/init/corosync-notifyd.service.in b/init/corosync-notifyd.service.in
+index ba08b87..94c03c3 100644
+--- a/init/corosync-notifyd.service.in
++++ b/init/corosync-notifyd.service.in
+@@ -1,6 +1,6 @@
+ [Unit]
+ Description=Corosync Dbus and snmp notifier
+-Wants=corosync.service
++Requires=corosync.service
+ After=corosync.service
+ 
+ [Service]
+@@ -8,7 +8,7 @@ EnvironmentFile=-@SYSCONFDIR@/sysconfig/corosync-notifyd
+ EnvironmentFile=-@SYSCONFDIR@/default/corosync-notifyd
+ ExecStart=@SBINDIR@/corosync-notifyd -f $OPTIONS
+ Type=simple
+-Restart=on-failure
++Restart=always
+ 
+ [Install]
+ WantedBy=multi-user.target

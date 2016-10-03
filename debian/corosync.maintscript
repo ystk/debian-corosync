@@ -1,0 +1,2 @@
+rm_conffile /etc/corosync/corosync.conf.example      2.3.5-1~
+rm_conffile /etc/corosync/corosync.conf.example.udpu 2.3.5-1~

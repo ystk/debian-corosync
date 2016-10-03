@@ -1,0 +1,24 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@niif.hu>
+Date: Thu, 3 Sep 2015 10:44:29 +0200
+Subject: Use OPTIONS in the corosync.conf Upstart file
+
+The SysV init script and the systemd service file use the OPTIONS variable
+from the default file.  corosync-notifyd also uses OPTIONS in all init
+configurations.  So just consolidate on this, upstream is inconsistent.
+---
+ init/corosync.conf.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/init/corosync.conf.in b/init/corosync.conf.in
+index e5d7798..8368c3f 100644
+--- a/init/corosync.conf.in
++++ b/init/corosync.conf.in
+@@ -13,7 +13,7 @@ env deb_lockfile=@LOCALSTATEDIR@/lock/corosync
+ script
+     [ -f "$rpm_sysconf" ] && . $rpm_sysconf
+     [ -f "$deb_sysconf" ] && . $deb_sysconf
+-    exec $prog $COROSYNC_OPTIONS
++    exec $prog $OPTIONS
+ end script
+ 
+ pre-start script

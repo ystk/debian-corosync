@@ -1,0 +1,4 @@
+Name: RDMA library
+Version: 1.0
+Description: Library for managing RDMA connections
+Libs: -lrdmacm

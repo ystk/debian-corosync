@@ -1,0 +1,32 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@niif.hu>
+Date: Wed, 18 May 2016 22:59:40 +0200
+Subject: Add Documentation URIs to the systemd service files
+
+These are used by systemctl help.
+---
+ init/corosync-notifyd.service.in | 1 +
+ init/corosync.service.in         | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/init/corosync-notifyd.service.in b/init/corosync-notifyd.service.in
+index 15d6da4..4284c19 100644
+--- a/init/corosync-notifyd.service.in
++++ b/init/corosync-notifyd.service.in
+@@ -1,5 +1,6 @@
+ [Unit]
+ Description=Corosync Dbus and snmp notifier
++Documentation=man:corosync-notifyd
+ Requires=corosync.service
+ After=corosync.service
+ 
+diff --git a/init/corosync.service.in b/init/corosync.service.in
+index 4f63b41..aecfc43 100644
+--- a/init/corosync.service.in
++++ b/init/corosync.service.in
+@@ -1,5 +1,6 @@
+ [Unit]
+ Description=Corosync Cluster Engine
++Documentation=man:corosync man:corosync.conf man:corosync_overview
+ ConditionKernelCommandLine=!nocluster
+ Requires=network-online.target
+ After=network-online.target

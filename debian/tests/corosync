@@ -1,0 +1,11 @@
+#!/bin/sh
+
+set -ex
+
+service corosync start
+sleep 10
+
+corosync-cfgtool -s | grep -20 'ring 0 active with no faults'
+corosync-quorumtool | grep -20 ' 1 localhost (local)'
+
+service corosync stop

@@ -1,0 +1,27 @@
+From: Svante Signell <svante.signell@gmail.com>
+Date: Tue, 10 May 2016 18:34:29 +0200
+Subject: configure.ac
+
+---
+ configure.ac | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/configure.ac b/configure.ac
+index c324c1a..3fe8b67 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -452,6 +452,14 @@ if test "x${enable_rdma}" = xyes; then
+ 	PACKAGE_FEATURES="$PACKAGE_FEATURES rdma"
+ 	WITH_LIST="$WITH_LIST --with rdma"
+ fi
++	AC_CHECK_DECL([PATH_MAX], [], [], [#include <limits.h>])
++	if test "x${ac_cv_have_decl_PATH_MAX}" = "xno"; then
++		AC_DEFINE_UNQUOTED([PATH_MAX], [4096] , [Define PATH_MAX if not defined])
++	fi
++	AC_CHECK_DECL([PIPE_BUF], [], [], [#include <limits.h>])
++	if test "x${ac_cv_have_decl_PIPE_BUF}" = "xno"; then
++	   AC_DEFINE_UNQUOTED([PIPE_BUF], [_POSIX_PIPE_BUF] , [Define PIPE_BUF to _POSIX_PIPE_BUF if not defined])
++	fi
+ 
+ if test "x${enable_monitoring}" = xyes; then
+ 	PKG_CHECK_MODULES([statgrab], [libstatgrab])

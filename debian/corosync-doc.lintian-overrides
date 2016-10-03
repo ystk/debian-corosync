@@ -1,0 +1,4 @@
+# This file is installed by Doxygen and is more than just a minimized jQuery
+# copy.  The Doxygen maintainers recommend against trying to replace it with
+# a symlink to the version in libjs-jquery.
+embedded-javascript-library usr/share/doc/corosync/api/html/jquery.js please use libjs-jquery

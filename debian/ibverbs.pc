@@ -1,0 +1,4 @@
+Name: IB verbs
+Version: 1.1.8
+Description: Library for direct userspace use of RDMA (InfiniBand/iWARP)
+Libs: -libverbs

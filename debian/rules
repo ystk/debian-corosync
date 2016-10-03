@@ -1,0 +1,96 @@
+#!/usr/bin/make -f
+
+# see FEATURE AREAS in dpkg-buildflags(1)
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+# Ensure that we link against all needed libraries (cf. Policy 10.2)
+export DEB_LDFLAGS_MAINT_APPEND=-Wl,-z,defs
+
+# Provide reproducible timestamps for the manual pages
+export PACKAGING_DATE=$(shell date -d "$$(dpkg-parsechangelog -SDate)" +%F --utc)
+
+ifneq ($(wildcard /usr/include/rdma/rdma_cma.h),)
+# Provide .pc files for rdmacm and ibverbs
+export PKG_CONFIG_PATH=debian
+enable-rdma=--enable-rdma
+endif
+
+ifneq ($(wildcard /usr/include/statgrab.h),)
+enable-monitoring=--enable-monitoring
+endif
+
+ifneq ($(wildcard /usr/include/linux/watchdog.h),)
+enable-watchdog=--enable-watchdog
+endif
+
+ifneq ($(wildcard /usr/include/systemd/sd-daemon.h),)
+enable-systemd=--enable-systemd
+initscript-dir=usr/share/corosync
+else
+initscript-dir=etc/init.d
+endif
+
+%:
+	dh $@ --parallel --with autoreconf,systemd
+
+# Avoid useless dependencies in the libraries
+override_dh_autoreconf:
+	dh_autoreconf --as-needed
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+	    --with-logdir=/var/log/corosync \
+	    --enable-dbus \
+	    $(enable-rdma) \
+	    $(enable-monitoring) \
+	    $(enable-watchdog) \
+	    --enable-augeas \
+	    --enable-snmp \
+	    --enable-xmlconf \
+	    $(enable-systemd) \
+	    --enable-upstart \
+	    --enable-qdevices \
+	    --disable-static
+
+override_dh_auto_build-indep:
+	$(MAKE) -C man
+	$(MAKE) doxygen
+	find doc/api/html -name "*.md5" -print -delete
+
+# The check target would unnecessarily build the software
+override_dh_auto_test-indep:
+
+override_dh_auto_install-indep:
+	$(MAKE) -C man DESTDIR="$(CURDIR)/debian/tmp" install
+
+override_dh_auto_install-arch:
+	dh_auto_install
+	rm -v debian/tmp/usr/lib/*/lib*.la
+# we don't need the upstream SysV init scripts and license
+	rm debian/tmp/$(initscript-dir)/corosync \
+	   debian/tmp/$(initscript-dir)/corosync-notifyd \
+	   debian/tmp/usr/share/doc/corosync/LICENSE
+
+override_dh_install:
+	dh_install --fail-missing
+
+override_dh_installchangelogs:
+	dh_installchangelogs ChangeLog
+
+override_dh_strip:
+	dh_strip --dbg-package=corosync-dbg
+
+# Play safe
+.DELETE_ON_ERROR:
+
+DESC_SUBST=debian/description.subst
+
+$(DESC_SUBST): debian/description
+	tr '\n' _ < $< | sed 's/^/DESCRIPTION=/;s/_/$${Newline}/g' >$@
+
+override_dh_gencontrol: $(DESC_SUBST)
+	debian/check_header_deps
+	dh_gencontrol -- -T$<
+
+override_dh_clean:
+	dh_clean $(DESC_SUBST)

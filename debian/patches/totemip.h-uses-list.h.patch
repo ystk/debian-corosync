@@ -1,0 +1,29 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@niif.hu>
+Date: Thu, 22 Oct 2015 14:02:04 +0200
+Subject: totemip.h uses list.h
+
+Until https://github.com/corosync/corosync/issues/81 is fixed by upstream,
+partially revert d9a2110.
+---
+ include/Makefile.am | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/include/Makefile.am b/include/Makefile.am
+index c056674..7d700fb 100644
+--- a/include/Makefile.am
++++ b/include/Makefile.am
+@@ -31,12 +31,12 @@
+ 
+ MAINTAINERCLEANFILES    = Makefile.in corosync/config.h.in
+ 
+-CS_H			= hdb.h cpg.h cfg.h corodefs.h \
++CS_H			= hdb.h cpg.h cfg.h corodefs.h list.h \
+ 			corotypes.h quorum.h votequorum.h sam.h cmap.h
+ 
+ CS_INTERNAL_H		= ipc_cfg.h ipc_cpg.h ipc_quorum.h 	\
+ 			quorum.h sq.h ipc_votequorum.h ipc_cmap.h \
+-			logsys.h coroapi.h icmap.h mar_gen.h list.h swab.h
++			logsys.h coroapi.h icmap.h mar_gen.h swab.h
+ 
+ TOTEM_H			= totem.h totemip.h totempg.h
+ 

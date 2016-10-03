@@ -1,0 +1,29 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@niif.hu>
+Date: Thu, 13 Aug 2015 01:20:28 +0200
+Subject: Generalize corosync-notifyd systemd service file
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Use @SYSCONFDIR@/default/corosync-notifyd as an additional environment file
+option besides sysconfig.
+
+Signed-off-by: Ferenc Wágner <wferi@niif.hu>
+---
+ init/corosync-notifyd.service.in | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/init/corosync-notifyd.service.in b/init/corosync-notifyd.service.in
+index ce576fe..ba08b87 100644
+--- a/init/corosync-notifyd.service.in
++++ b/init/corosync-notifyd.service.in
+@@ -4,7 +4,8 @@ Wants=corosync.service
+ After=corosync.service
+ 
+ [Service]
+-EnvironmentFile=@SYSCONFDIR@/sysconfig/corosync-notifyd
++EnvironmentFile=-@SYSCONFDIR@/sysconfig/corosync-notifyd
++EnvironmentFile=-@SYSCONFDIR@/default/corosync-notifyd
+ ExecStart=@SBINDIR@/corosync-notifyd -f $OPTIONS
+ Type=simple
+ Restart=on-failure

@@ -1,0 +1,332 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@niif.hu>
+Date: Tue, 25 Aug 2015 14:14:03 +0200
+Subject: Substitute LOGDIR into the example configs
+
+Closes: #739730
+---
+ conf/corosync.conf.example         | 81 --------------------------------------
+ conf/corosync.conf.example.in      | 81 ++++++++++++++++++++++++++++++++++++++
+ conf/corosync.conf.example.udpu    | 58 ---------------------------
+ conf/corosync.conf.example.udpu.in | 58 +++++++++++++++++++++++++++
+ configure.ac                       |  2 +
+ 5 files changed, 141 insertions(+), 139 deletions(-)
+ delete mode 100644 conf/corosync.conf.example
+ create mode 100644 conf/corosync.conf.example.in
+ delete mode 100644 conf/corosync.conf.example.udpu
+ create mode 100644 conf/corosync.conf.example.udpu.in
+
+diff --git a/conf/corosync.conf.example b/conf/corosync.conf.example
+deleted file mode 100644
+index 7b3abed..0000000
+--- a/conf/corosync.conf.example
++++ /dev/null
+@@ -1,81 +0,0 @@
+-# Please read the corosync.conf.5 manual page
+-totem {
+-	version: 2
+-
+-	# crypto_cipher and crypto_hash: Used for mutual node authentication.
+-	# If you choose to enable this, then do remember to create a shared
+-	# secret with "corosync-keygen".
+-	# enabling crypto_cipher, requires also enabling of crypto_hash.
+-	crypto_cipher: none
+-	crypto_hash: none
+-
+-	# interface: define at least one interface to communicate
+-	# over. If you define more than one interface stanza, you must
+-	# also set rrp_mode.
+-	interface {
+-                # Rings must be consecutively numbered, starting at 0.
+-		ringnumber: 0
+-		# This is normally the *network* address of the
+-		# interface to bind to. This ensures that you can use
+-		# identical instances of this configuration file
+-		# across all your cluster nodes, without having to
+-		# modify this option.
+-		bindnetaddr: 192.168.1.0
+-		# However, if you have multiple physical network
+-		# interfaces configured for the same subnet, then the
+-		# network address alone is not sufficient to identify
+-		# the interface Corosync should bind to. In that case,
+-		# configure the *host* address of the interface
+-		# instead:
+-		# bindnetaddr: 192.168.1.1
+-		# When selecting a multicast address, consider RFC
+-		# 2365 (which, among other things, specifies that
+-		# 239.255.x.x addresses are left to the discretion of
+-		# the network administrator). Do not reuse multicast
+-		# addresses across multiple Corosync clusters sharing
+-		# the same network.
+-		mcastaddr: 239.255.1.1
+-		# Corosync uses the port you specify here for UDP
+-		# messaging, and also the immediately preceding
+-		# port. Thus if you set this to 5405, Corosync sends
+-		# messages over UDP ports 5405 and 5404.
+-		mcastport: 5405
+-		# Time-to-live for cluster communication packets. The
+-		# number of hops (routers) that this ring will allow
+-		# itself to pass. Note that multicast routing must be
+-		# specifically enabled on most network routers.
+-		ttl: 1
+-	}
+-}
+-
+-logging {
+-	# Log the source file and line where messages are being
+-	# generated. When in doubt, leave off. Potentially useful for
+-	# debugging.
+-	fileline: off
+-	# Log to standard error. When in doubt, set to no. Useful when
+-	# running in the foreground (when invoking "corosync -f")
+-	to_stderr: no
+-	# Log to a log file. When set to "no", the "logfile" option
+-	# must not be set.
+-	to_logfile: yes
+-	logfile: /var/log/cluster/corosync.log
+-	# Log to the system log daemon. When in doubt, set to yes.
+-	to_syslog: yes
+-	# Log debug messages (very verbose). When in doubt, leave off.
+-	debug: off
+-	# Log messages with time stamps. When in doubt, set to on
+-	# (unless you are only logging to syslog, where double
+-	# timestamps can be annoying).
+-	timestamp: on
+-	logger_subsys {
+-		subsys: QUORUM
+-		debug: off
+-	}
+-}
+-
+-quorum {
+-	# Enable and configure quorum subsystem (default: off)
+-	# see also corosync.conf.5 and votequorum.5
+-	#provider: corosync_votequorum
+-}
+diff --git a/conf/corosync.conf.example.in b/conf/corosync.conf.example.in
+new file mode 100644
+index 0000000..c9ee48e
+--- /dev/null
++++ b/conf/corosync.conf.example.in
+@@ -0,0 +1,81 @@
++# Please read the corosync.conf.5 manual page
++totem {
++	version: 2
++
++	# crypto_cipher and crypto_hash: Used for mutual node authentication.
++	# If you choose to enable this, then do remember to create a shared
++	# secret with "corosync-keygen".
++	# enabling crypto_cipher, requires also enabling of crypto_hash.
++	crypto_cipher: none
++	crypto_hash: none
++
++	# interface: define at least one interface to communicate
++	# over. If you define more than one interface stanza, you must
++	# also set rrp_mode.
++	interface {
++                # Rings must be consecutively numbered, starting at 0.
++		ringnumber: 0
++		# This is normally the *network* address of the
++		# interface to bind to. This ensures that you can use
++		# identical instances of this configuration file
++		# across all your cluster nodes, without having to
++		# modify this option.
++		bindnetaddr: 192.168.1.0
++		# However, if you have multiple physical network
++		# interfaces configured for the same subnet, then the
++		# network address alone is not sufficient to identify
++		# the interface Corosync should bind to. In that case,
++		# configure the *host* address of the interface
++		# instead:
++		# bindnetaddr: 192.168.1.1
++		# When selecting a multicast address, consider RFC
++		# 2365 (which, among other things, specifies that
++		# 239.255.x.x addresses are left to the discretion of
++		# the network administrator). Do not reuse multicast
++		# addresses across multiple Corosync clusters sharing
++		# the same network.
++		mcastaddr: 239.255.1.1
++		# Corosync uses the port you specify here for UDP
++		# messaging, and also the immediately preceding
++		# port. Thus if you set this to 5405, Corosync sends
++		# messages over UDP ports 5405 and 5404.
++		mcastport: 5405
++		# Time-to-live for cluster communication packets. The
++		# number of hops (routers) that this ring will allow
++		# itself to pass. Note that multicast routing must be
++		# specifically enabled on most network routers.
++		ttl: 1
++	}
++}
++
++logging {
++	# Log the source file and line where messages are being
++	# generated. When in doubt, leave off. Potentially useful for
++	# debugging.
++	fileline: off
++	# Log to standard error. When in doubt, set to no. Useful when
++	# running in the foreground (when invoking "corosync -f")
++	to_stderr: no
++	# Log to a log file. When set to "no", the "logfile" option
++	# must not be set.
++	to_logfile: yes
++	logfile: @LOGDIR@/corosync.log
++	# Log to the system log daemon. When in doubt, set to yes.
++	to_syslog: yes
++	# Log debug messages (very verbose). When in doubt, leave off.
++	debug: off
++	# Log messages with time stamps. When in doubt, set to on
++	# (unless you are only logging to syslog, where double
++	# timestamps can be annoying).
++	timestamp: on
++	logger_subsys {
++		subsys: QUORUM
++		debug: off
++	}
++}
++
++quorum {
++	# Enable and configure quorum subsystem (default: off)
++	# see also corosync.conf.5 and votequorum.5
++	#provider: corosync_votequorum
++}
+diff --git a/conf/corosync.conf.example.udpu b/conf/corosync.conf.example.udpu
+deleted file mode 100644
+index abe3b9b..0000000
+--- a/conf/corosync.conf.example.udpu
++++ /dev/null
+@@ -1,58 +0,0 @@
+-# Please read the corosync.conf.5 manual page
+-totem {
+-	version: 2
+-
+-	crypto_cipher: none
+-	crypto_hash: none
+-
+-	interface {
+-		ringnumber: 0
+-		bindnetaddr: 10.16.35.0
+-		mcastport: 5405
+-		ttl: 1
+-	}
+-	transport: udpu
+-}
+-
+-logging {
+-	fileline: off
+-	to_logfile: yes
+-	to_syslog: yes
+-	logfile: /var/log/cluster/corosync.log
+-	debug: off
+-	timestamp: on
+-	logger_subsys {
+-		subsys: QUORUM
+-		debug: off
+-	}
+-}
+-
+-nodelist {
+-	node {
+-		ring0_addr: 10.16.35.101
+-		nodeid: 1
+-	}
+-
+-	node {
+-		ring0_addr: 10.16.35.102
+-		nodeid: 2
+-	}
+-
+-	node {
+-		ring0_addr: 10.16.35.103
+-	}
+-
+-	node {
+-		ring0_addr: 10.16.35.104
+-	}
+-
+-	node {
+-		ring0_addr: 10.16.35.105
+-	}
+-}
+-
+-quorum {
+-	# Enable and configure quorum subsystem (default: off)
+-	# see also corosync.conf.5 and votequorum.5
+-	#provider: corosync_votequorum
+-}
+diff --git a/conf/corosync.conf.example.udpu.in b/conf/corosync.conf.example.udpu.in
+new file mode 100644
+index 0000000..84bf353
+--- /dev/null
++++ b/conf/corosync.conf.example.udpu.in
+@@ -0,0 +1,58 @@
++# Please read the corosync.conf.5 manual page
++totem {
++	version: 2
++
++	crypto_cipher: none
++	crypto_hash: none
++
++	interface {
++		ringnumber: 0
++		bindnetaddr: 10.16.35.0
++		mcastport: 5405
++		ttl: 1
++	}
++	transport: udpu
++}
++
++logging {
++	fileline: off
++	to_logfile: yes
++	to_syslog: yes
++	logfile: @LOGDIR@/corosync.log
++	debug: off
++	timestamp: on
++	logger_subsys {
++		subsys: QUORUM
++		debug: off
++	}
++}
++
++nodelist {
++	node {
++		ring0_addr: 10.16.35.101
++		nodeid: 1
++	}
++
++	node {
++		ring0_addr: 10.16.35.102
++		nodeid: 2
++	}
++
++	node {
++		ring0_addr: 10.16.35.103
++	}
++
++	node {
++		ring0_addr: 10.16.35.104
++	}
++
++	node {
++		ring0_addr: 10.16.35.105
++	}
++}
++
++quorum {
++	# Enable and configure quorum subsystem (default: off)
++	# see also corosync.conf.5 and votequorum.5
++	#provider: corosync_votequorum
++}
+diff --git a/configure.ac b/configure.ac
+index 6a47abb..131f12d 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -204,6 +204,8 @@ AC_CONFIG_FILES([Makefile
+ 		 conf/Makefile
+ 		 qdevices/Makefile
+ 		 Doxyfile
++		 conf/corosync.conf.example
++		 conf/corosync.conf.example.udpu
+ 		 conf/logrotate/Makefile])
+ 
+ ### Local business
