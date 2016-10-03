@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2003-2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2007, 2009 Red Hat, Inc.
+ * Copyright (c) 2006-2011 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -33,6 +33,13 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+/**
+ * @file
+ * Totem Single Ring Protocol
+ *
+ * depends on poll abstraction, POSIX, IPV4
+ */
+
 #ifndef TOTEMPG_H_DEFINED
 #define TOTEMPG_H_DEFINED
 
@@ -40,10 +47,10 @@
 extern "C" {
 #endif
 
+#include <sys/types.h>
 #include <netinet/in.h>
 #include "totem.h"
-#include "coropoll.h"
-#include <corosync/hdb.h>
+#include <qb/qbloop.h>
 
 struct totempg_group {
 	const void *group;
@@ -53,16 +60,11 @@ struct totempg_group {
 #define TOTEMPG_AGREED			0
 #define TOTEMPG_SAFE			1
 
-/*
- * Totem Single Ring Protocol
- * depends on poll abstraction, POSIX, IPV4
- */
-
-/*
+/**
  * Initialize the totem process groups abstraction
  */
 extern int totempg_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t* poll_handle,
 	struct totem_config *totem_config
 );
 
@@ -76,11 +78,11 @@ extern int totempg_callback_token_create (void **handle_out,
 
 extern void totempg_callback_token_destroy (void *handle);
 
-/*
+/**
  * Initialize a groups instance
  */
 extern int totempg_groups_initialize (
-	hdb_handle_t *handle,
+	void **instance,
 
 	void (*deliver_fn) (
 		unsigned int nodeid,
@@ -95,27 +97,26 @@ extern int totempg_groups_initialize (
 		const unsigned int *joined_list, size_t joined_list_entries,
 		const struct memb_ring_id *ring_id));
 
-extern int totempg_groups_finalize (
-	hdb_handle_t handle);
+extern int totempg_groups_finalize (void *instance);
 
 extern int totempg_groups_join (
-	hdb_handle_t handle,
+	void *instance,
 	const struct totempg_group *groups,
 	size_t group_cnt);
 
 extern int totempg_groups_leave (
-	hdb_handle_t handle,
+	void *instance,
 	const struct totempg_group *groups,
 	size_t group_cnt);
 
 extern int totempg_groups_mcast_joined (
-	hdb_handle_t handle,
+	void *instance,
 	const struct iovec *iovec,
 	unsigned int iov_len,
 	int guarantee);
 
 extern int totempg_groups_joined_reserve (
-	hdb_handle_t handle,
+	void *instance,
 	const struct iovec *iovec,
 	unsigned int iov_len);
 
@@ -123,7 +124,7 @@ extern int totempg_groups_joined_release (
 	int msg_count);
 
 extern int totempg_groups_mcast_groups (
-	hdb_handle_t handle,
+	void *instance,
 	int guarantee,
 	const struct totempg_group *groups,
 	size_t groups_cnt,
@@ -131,7 +132,7 @@ extern int totempg_groups_mcast_groups (
 	unsigned int iov_len);
 
 extern int totempg_groups_send_ok_groups (
-	hdb_handle_t handle,
+	void *instance,
 	const struct totempg_group *groups,
 	size_t groups_cnt,
 	const struct iovec *iovec,
@@ -140,6 +141,7 @@ extern int totempg_groups_send_ok_groups (
 extern int totempg_ifaces_get (
 	unsigned int nodeid,
         struct totem_ip_address *interfaces,
+        unsigned int interfaces_size,
 	char ***status,
         unsigned int *iface_count);
 
@@ -153,12 +155,36 @@ extern unsigned int totempg_my_nodeid_get (void);
 
 extern int totempg_my_family_get (void);
 
-extern int totempg_crypto_set (unsigned int type);
+extern int totempg_crypto_set (const char *cipher_type, const char *hash_type);
 
 extern int totempg_ring_reenable (void);
 
 extern void totempg_service_ready_register (
 	void (*totem_service_ready) (void));
+
+extern int totempg_member_add (
+	const struct totem_ip_address *member,
+	int ring_no);
+
+extern int totempg_member_remove (
+	const struct totem_ip_address *member,
+	int ring_no);
+
+enum totem_q_level {
+	TOTEM_Q_LEVEL_LOW,
+	TOTEM_Q_LEVEL_GOOD,
+	TOTEM_Q_LEVEL_HIGH,
+	TOTEM_Q_LEVEL_CRITICAL
+};
+
+void totempg_check_q_level(void *instance);
+
+typedef void (*totem_queue_level_changed_fn) (enum totem_q_level level);
+extern void totempg_queue_level_register_callback (totem_queue_level_changed_fn);
+
+extern void totempg_threaded_mode_enable (void);
+
+extern void totempg_trans_ack (void);
 
 #ifdef __cplusplus
 }

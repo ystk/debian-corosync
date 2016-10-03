@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009 Red Hat, Inc.
+ * Copyright (c) 2009-2011 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -37,27 +37,18 @@
 
 #include <netinet/in.h>
 
-#define COROSYNC_SOCKET_NAME	"corosync.ipc"
-
+/**
+ * @brief The corosync_service_types enum
+ */
 enum corosync_service_types {
-	EVS_SERVICE = 0,
-	CLM_SERVICE = 1,
-	AMF_SERVICE = 2,
-	CKPT_SERVICE = 3,
-	EVT_SERVICE = 4,
-	LCK_SERVICE = 5,
-	MSG_SERVICE = 6,
-	CFG_SERVICE = 7,
-	CPG_SERVICE = 8,
-	CMAN_SERVICE = 9,
-	PCMK_SERVICE = 10,
-	CONFDB_SERVICE = 11,
-	QUORUM_SERVICE = 12,
-	PLOAD_SERVICE = 13,
-	TMR_SERVICE = 14,
-	VOTEQUORUM_SERVICE = 15,
-	NTF_SERVICE = 16,
-	AMF_V2_SERVICE = 17
+	CMAP_SERVICE = 0,
+	CFG_SERVICE = 1,
+	CPG_SERVICE = 2,
+	QUORUM_SERVICE = 3,
+	PLOAD_SERVICE = 4,
+	VOTEQUORUM_SERVICE = 5,
+	MON_SERVICE = 6,
+	WD_SERVICE = 7,
 };
 
 #ifdef HAVE_SMALL_MEMORY_FOOTPRINT

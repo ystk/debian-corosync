@@ -1,7 +1,7 @@
 /*
  * vi: set autoindent tabstop=4 shiftwidth=4 :
  *
- * Copyright (c) 2006-2009 Red Hat, Inc.
+ * Copyright (c) 2006-2015 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -41,37 +41,70 @@
 #include <config.h>
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
+#include <sys/uio.h>
+#include <sys/stat.h>
 #include <errno.h>
+#include <limits.h>
 
-#include <corosync/corotypes.h>
-#include <corosync/coroipc_types.h>
-#include <corosync/coroipcc.h>
-#include <corosync/corodefs.h>
+#include <qb/qbdefs.h>
+#include <qb/qbipcc.h>
+#include <qb/qblog.h>
+
 #include <corosync/hdb.h>
 #include <corosync/list.h>
-
+#include <corosync/corotypes.h>
+#include <corosync/corodefs.h>
 #include <corosync/cpg.h>
 #include <corosync/ipc_cpg.h>
 
 #include "util.h"
 
-struct cpg_inst {
-	hdb_handle_t handle;
-	int finalize;
-	cpg_callbacks_t callbacks;
-	void *context;
-	struct list_head iteration_list_head;
-};
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 
-DECLARE_HDB_DATABASE(cpg_handle_t_db,NULL);
+/*
+ * Maximum number of times to retry a send when transmitting
+ * a large message fragment
+ */
+#define MAX_RETRIES 100
+
+/*
+ * ZCB files have following umask (umask is same as used in libqb)
+ */
+#define CPG_MEMORY_MAP_UMASK		077
+
+struct cpg_inst {
+	qb_ipcc_connection_t *c;
+	int finalize;
+	void *context;
+	union {
+		cpg_model_data_t model_data;
+		cpg_model_v1_data_t model_v1_data;
+	};
+	struct list_head iteration_list_head;
+    uint32_t max_msg_size;
+    char *assembly_buf;
+    uint32_t assembly_buf_ptr;
+    int assembling; /* Flag that says we have started assembling a message.
+					 * It's here to catch the situation where a node joins
+					 * the cluster/group in the middle of a CPG message send
+					 * so we don't pass on a partial message to the client.
+					 */
+};
+static void cpg_inst_free (void *inst);
+
+DECLARE_HDB_DATABASE(cpg_handle_t_db, cpg_inst_free);
 
 struct cpg_iteration_instance_t {
 	cpg_iteration_handle_t cpg_iteration_handle;
-	hdb_handle_t conn_handle;
+	qb_ipcc_connection_t *conn;
 	hdb_handle_t executive_iteration_handle;
 	struct list_head list;
 };
@@ -83,10 +116,28 @@ DECLARE_HDB_DATABASE(cpg_iteration_handle_t_db,NULL);
  * Internal (not visible by API) functions
  */
 
+static cs_error_t
+coroipcc_msg_send_reply_receive (
+	qb_ipcc_connection_t *c,
+	const struct iovec *iov,
+	unsigned int iov_len,
+	void *res_msg,
+	size_t res_len)
+{
+	return qb_to_cs_error(qb_ipcc_sendv_recv(c, iov, iov_len, res_msg, res_len,
+				CS_IPC_TIMEOUT_MS));
+}
+
 static void cpg_iteration_instance_finalize (struct cpg_iteration_instance_t *cpg_iteration_instance)
 {
 	list_del (&cpg_iteration_instance->list);
 	hdb_handle_destroy (&cpg_iteration_handle_t_db, cpg_iteration_instance->cpg_iteration_handle);
+}
+
+static void cpg_inst_free (void *inst)
+{
+	struct cpg_inst *cpg_inst = (struct cpg_inst *)inst;
+	qb_ipcc_disconnect(cpg_inst->c);
 }
 
 static void cpg_inst_finalize (struct cpg_inst *cpg_inst, hdb_handle_t handle)
@@ -118,8 +169,31 @@ cs_error_t cpg_initialize (
 	cpg_handle_t *handle,
 	cpg_callbacks_t *callbacks)
 {
+	cpg_model_v1_data_t model_v1_data;
+
+	memset (&model_v1_data, 0, sizeof (cpg_model_v1_data_t));
+
+	if (callbacks) {
+		model_v1_data.cpg_deliver_fn = callbacks->cpg_deliver_fn;
+		model_v1_data.cpg_confchg_fn = callbacks->cpg_confchg_fn;
+	}
+
+	return (cpg_model_initialize (handle, CPG_MODEL_V1, (cpg_model_data_t *)&model_v1_data, NULL));
+}
+
+cs_error_t cpg_model_initialize (
+	cpg_handle_t *handle,
+	cpg_model_t model,
+	cpg_model_data_t *model_data,
+	void *context)
+{
 	cs_error_t error;
 	struct cpg_inst *cpg_inst;
+
+	if (model != CPG_MODEL_V1) {
+		error = CS_ERR_INVALID_PARAM;
+		goto error_no_destroy;
+	}
 
 	error = hdb_error_to_cs (hdb_handle_create (&cpg_handle_t_db, sizeof (struct cpg_inst), handle));
 	if (error != CS_OK) {
@@ -131,20 +205,29 @@ cs_error_t cpg_initialize (
 		goto error_destroy;
 	}
 
-	error = coroipcc_service_connect (
-		COROSYNC_SOCKET_NAME,
-		CPG_SERVICE,
-		IPC_REQUEST_SIZE,
-		IPC_RESPONSE_SIZE,
-		IPC_DISPATCH_SIZE,
-		&cpg_inst->handle);
-	if (error != CS_OK) {
+	cpg_inst->c = qb_ipcc_connect ("cpg", IPC_REQUEST_SIZE);
+	if (cpg_inst->c == NULL) {
+		error = qb_to_cs_error(-errno);
 		goto error_put_destroy;
 	}
 
-	if (callbacks) {
-		memcpy (&cpg_inst->callbacks, callbacks, sizeof (cpg_callbacks_t));
+	if (model_data != NULL) {
+		switch (model) {
+		case CPG_MODEL_V1:
+			memcpy (&cpg_inst->model_v1_data, model_data, sizeof (cpg_model_v1_data_t));
+			if ((cpg_inst->model_v1_data.flags & ~(CPG_MODEL_V1_DELIVER_INITIAL_TOTEM_CONF)) != 0) {
+				error = CS_ERR_INVALID_PARAM;
+
+				goto error_destroy;
+			}
+			break;
+		}
 	}
+
+	/* Allow space for corosync internal headers */
+	cpg_inst->max_msg_size = IPC_REQUEST_SIZE - 1024;
+	cpg_inst->model_data.model = model;
+	cpg_inst->context = context;
 
 	list_init(&cpg_inst->iteration_list_head);
 
@@ -179,7 +262,7 @@ cs_error_t cpg_finalize (
 	 */
 	if (cpg_inst->finalize) {
 		hdb_handle_put (&cpg_handle_t_db, handle);
-		return (CPG_ERR_BAD_HANDLE);
+		return (CS_ERR_BAD_HANDLE);
 	}
 
 	cpg_inst->finalize = 1;
@@ -193,26 +276,15 @@ cs_error_t cpg_finalize (
 	iov.iov_base = (void *)&req_lib_cpg_finalize;
 	iov.iov_len = sizeof (struct req_lib_cpg_finalize);
 
-	error = coroipcc_msg_send_reply_receive (cpg_inst->handle,
+	error = coroipcc_msg_send_reply_receive (cpg_inst->c,
 		&iov,
 		1,
 		&res_lib_cpg_finalize,
-		sizeof (struct req_lib_cpg_finalize));
-
-	if (error != CS_OK) {
-		goto error_put;
-	}
-
-	coroipcc_service_disconnect (cpg_inst->handle);
+		sizeof (struct res_lib_cpg_finalize));
 
 	cpg_inst_finalize (cpg_inst, handle);
 	hdb_handle_put (&cpg_handle_t_db, handle);
 
-	return (CPG_OK);
-
-error_put:
-	hdb_handle_put (&cpg_iteration_handle_t_db, handle);
-	cpg_inst->finalize = 0;
 	return (error);
 }
 
@@ -228,7 +300,26 @@ cs_error_t cpg_fd_get (
 		return (error);
 	}
 
-	error = coroipcc_fd_get (cpg_inst->handle, fd);
+	error = qb_to_cs_error (qb_ipcc_fd_get (cpg_inst->c, fd));
+
+	hdb_handle_put (&cpg_handle_t_db, handle);
+
+	return (error);
+}
+
+cs_error_t cpg_max_atomic_msgsize_get (
+	cpg_handle_t handle,
+	uint32_t *size)
+{
+	cs_error_t error;
+	struct cpg_inst *cpg_inst;
+
+	error = hdb_error_to_cs (hdb_handle_get (&cpg_handle_t_db, handle, (void *)&cpg_inst));
+	if (error != CS_OK) {
+		return (error);
+	}
+
+	*size = cpg_inst->max_msg_size;
 
 	hdb_handle_put (&cpg_handle_t_db, handle);
 
@@ -283,8 +374,10 @@ cs_error_t cpg_dispatch (
 	struct cpg_inst *cpg_inst;
 	struct res_lib_cpg_confchg_callback *res_cpg_confchg_callback;
 	struct res_lib_cpg_deliver_callback *res_cpg_deliver_callback;
-	cpg_callbacks_t callbacks;
-	coroipc_response_header_t *dispatch_data;
+	struct res_lib_cpg_partial_deliver_callback *res_cpg_partial_deliver_callback;
+	struct res_lib_cpg_totem_confchg_callback *res_cpg_totem_confchg_callback;
+	struct cpg_inst cpg_inst_copy;
+	struct qb_ipc_response_header *dispatch_data;
 	struct cpg_address member_list[CPG_MEMBERS_MAX];
 	struct cpg_address left_list[CPG_MEMBERS_MAX];
 	struct cpg_address joined_list[CPG_MEMBERS_MAX];
@@ -292,6 +385,10 @@ cs_error_t cpg_dispatch (
 	mar_cpg_address_t *left_list_start;
 	mar_cpg_address_t *joined_list_start;
 	unsigned int i;
+	struct cpg_ring_id ring_id;
+	uint32_t totem_member_list[CPG_MEMBERS_MAX];
+	int32_t errno_res;
+	char dispatch_buf[IPC_DISPATCH_SIZE];
 
 	error = hdb_error_to_cs (hdb_handle_get (&cpg_handle_t_db, handle, (void *)&cpg_inst));
 	if (error != CS_OK) {
@@ -299,25 +396,34 @@ cs_error_t cpg_dispatch (
 	}
 
 	/*
-	 * Timeout instantly for CS_DISPATCH_ONE or CS_DISPATCH_ALL and
-	 * wait indefinately for CS_DISPATCH_BLOCKING
+	 * Timeout instantly for CS_DISPATCH_ONE_NONBLOCKING or CS_DISPATCH_ALL and
+	 * wait indefinitely for CS_DISPATCH_ONE or CS_DISPATCH_BLOCKING
 	 */
-	if (dispatch_types == CPG_DISPATCH_ALL) {
+	if (dispatch_types == CS_DISPATCH_ALL || dispatch_types == CS_DISPATCH_ONE_NONBLOCKING) {
 		timeout = 0;
 	}
 
+	dispatch_data = (struct qb_ipc_response_header *)dispatch_buf;
 	do {
-		error = coroipcc_dispatch_get (
-			cpg_inst->handle,
-			(void **)&dispatch_data,
+		errno_res = qb_ipcc_event_recv (
+			cpg_inst->c,
+			dispatch_buf,
+			IPC_DISPATCH_SIZE,
 			timeout);
+		error = qb_to_cs_error (errno_res);
 		if (error == CS_ERR_BAD_HANDLE) {
 			error = CS_OK;
 			goto error_put;
 		}
 		if (error == CS_ERR_TRY_AGAIN) {
+			if (dispatch_types == CS_DISPATCH_ONE_NONBLOCKING) {
+				/*
+				 * Don't mask error
+				 */
+				goto error_put;
+			}
 			error = CS_OK;
-			if (dispatch_types == CPG_DISPATCH_ALL) {
+			if (dispatch_types == CS_DISPATCH_ALL) {
 				break; /* exit do while cont is 1 loop */
 			} else {
 				continue; /* next poll */
@@ -332,80 +438,145 @@ cs_error_t cpg_dispatch (
 		 * A risk of this dispatch method is that the callback routines may
 		 * operate at the same time that cpgFinalize has been called.
 		 */
-		memcpy (&callbacks, &cpg_inst->callbacks, sizeof (cpg_callbacks_t));
-		/*
-		 * Dispatch incoming message
-		 */
-		switch (dispatch_data->id) {
-		case MESSAGE_RES_CPG_DELIVER_CALLBACK:
-			if (callbacks.cpg_deliver_fn == NULL) {
-				continue;
-			}
+		memcpy (&cpg_inst_copy, cpg_inst, sizeof (struct cpg_inst));
+		switch (cpg_inst_copy.model_data.model) {
+		case CPG_MODEL_V1:
+			/*
+			 * Dispatch incoming message
+			 */
+			switch (dispatch_data->id) {
+			case MESSAGE_RES_CPG_DELIVER_CALLBACK:
+				if (cpg_inst_copy.model_v1_data.cpg_deliver_fn == NULL) {
+					break;
+				}
 
-			res_cpg_deliver_callback = (struct res_lib_cpg_deliver_callback *)dispatch_data;
+				res_cpg_deliver_callback = (struct res_lib_cpg_deliver_callback *)dispatch_data;
 
-			marshall_from_mar_cpg_name_t (
-				&group_name,
-				&res_cpg_deliver_callback->group_name);
+				marshall_from_mar_cpg_name_t (
+					&group_name,
+					&res_cpg_deliver_callback->group_name);
 
-			callbacks.cpg_deliver_fn (handle,
-				&group_name,
-				res_cpg_deliver_callback->nodeid,
-				res_cpg_deliver_callback->pid,
-				&res_cpg_deliver_callback->message,
-				res_cpg_deliver_callback->msglen);
-			break;
+				cpg_inst_copy.model_v1_data.cpg_deliver_fn (handle,
+					&group_name,
+					res_cpg_deliver_callback->nodeid,
+					res_cpg_deliver_callback->pid,
+					&res_cpg_deliver_callback->message,
+					res_cpg_deliver_callback->msglen);
+				break;
 
-		case MESSAGE_RES_CPG_CONFCHG_CALLBACK:
-			if (callbacks.cpg_confchg_fn == NULL) {
-				continue;
-			}
+			case MESSAGE_RES_CPG_PARTIAL_DELIVER_CALLBACK:
+				res_cpg_partial_deliver_callback = (struct res_lib_cpg_partial_deliver_callback *)dispatch_data;
 
-			res_cpg_confchg_callback = (struct res_lib_cpg_confchg_callback *)dispatch_data;
+				marshall_from_mar_cpg_name_t (
+					&group_name,
+					&res_cpg_partial_deliver_callback->group_name);
 
-			for (i = 0; i < res_cpg_confchg_callback->member_list_entries; i++) {
-				marshall_from_mar_cpg_address_t (&member_list[i],
-					&res_cpg_confchg_callback->member_list[i]);
-			}
-			left_list_start = res_cpg_confchg_callback->member_list +
-				res_cpg_confchg_callback->member_list_entries;
-			for (i = 0; i < res_cpg_confchg_callback->left_list_entries; i++) {
-				marshall_from_mar_cpg_address_t (&left_list[i],
-					&left_list_start[i]);
-			}
-			joined_list_start = res_cpg_confchg_callback->member_list +
-				res_cpg_confchg_callback->member_list_entries +
-				res_cpg_confchg_callback->left_list_entries;
-			for (i = 0; i < res_cpg_confchg_callback->joined_list_entries; i++) {
-				marshall_from_mar_cpg_address_t (&joined_list[i],
-					&joined_list_start[i]);
-			}
-			marshall_from_mar_cpg_name_t (
-				&group_name,
-				&res_cpg_confchg_callback->group_name);
+				if (res_cpg_partial_deliver_callback->type == LIBCPG_PARTIAL_FIRST) {
+					/*
+					 * Allocate a buffer to contain a full message.
+					 */
+					cpg_inst->assembly_buf = malloc(res_cpg_partial_deliver_callback->msglen);
+					if (!cpg_inst->assembly_buf) {
+						error = CS_ERR_NO_MEMORY;
+						goto error_put;
+					}
+					cpg_inst->assembling = 1;
+					cpg_inst->assembly_buf_ptr = 0;
+				}
+				if (cpg_inst->assembling) {
+					memcpy(cpg_inst->assembly_buf + cpg_inst->assembly_buf_ptr,
+					       res_cpg_partial_deliver_callback->message, res_cpg_partial_deliver_callback->fraglen);
+					cpg_inst->assembly_buf_ptr += res_cpg_partial_deliver_callback->fraglen;
 
-			callbacks.cpg_confchg_fn (handle,
-				&group_name,
-				member_list,
-				res_cpg_confchg_callback->member_list_entries,
-				left_list,
-				res_cpg_confchg_callback->left_list_entries,
-				joined_list,
-				res_cpg_confchg_callback->joined_list_entries);
-			break;
+					if (res_cpg_partial_deliver_callback->type == LIBCPG_PARTIAL_LAST) {
+						cpg_inst_copy.model_v1_data.cpg_deliver_fn (handle,
+							&group_name,
+							res_cpg_partial_deliver_callback->nodeid,
+							res_cpg_partial_deliver_callback->pid,
+							cpg_inst->assembly_buf,
+							res_cpg_partial_deliver_callback->msglen);
+						free(cpg_inst->assembly_buf);
+						cpg_inst->assembling = 0;
+					}
+				}
+				break;
 
-		default:
-			coroipcc_dispatch_put (cpg_inst->handle);
-			error = CS_ERR_LIBRARY;
+			case MESSAGE_RES_CPG_CONFCHG_CALLBACK:
+				if (cpg_inst_copy.model_v1_data.cpg_confchg_fn == NULL) {
+					break;
+				}
+
+				res_cpg_confchg_callback = (struct res_lib_cpg_confchg_callback *)dispatch_data;
+
+				for (i = 0; i < res_cpg_confchg_callback->member_list_entries; i++) {
+					marshall_from_mar_cpg_address_t (&member_list[i],
+						&res_cpg_confchg_callback->member_list[i]);
+				}
+				left_list_start = res_cpg_confchg_callback->member_list +
+					res_cpg_confchg_callback->member_list_entries;
+				for (i = 0; i < res_cpg_confchg_callback->left_list_entries; i++) {
+					marshall_from_mar_cpg_address_t (&left_list[i],
+						&left_list_start[i]);
+				}
+				joined_list_start = res_cpg_confchg_callback->member_list +
+					res_cpg_confchg_callback->member_list_entries +
+					res_cpg_confchg_callback->left_list_entries;
+				for (i = 0; i < res_cpg_confchg_callback->joined_list_entries; i++) {
+					marshall_from_mar_cpg_address_t (&joined_list[i],
+						&joined_list_start[i]);
+				}
+				marshall_from_mar_cpg_name_t (
+					&group_name,
+					&res_cpg_confchg_callback->group_name);
+
+				cpg_inst_copy.model_v1_data.cpg_confchg_fn (handle,
+					&group_name,
+					member_list,
+					res_cpg_confchg_callback->member_list_entries,
+					left_list,
+					res_cpg_confchg_callback->left_list_entries,
+					joined_list,
+					res_cpg_confchg_callback->joined_list_entries);
+
+				break;
+			case MESSAGE_RES_CPG_TOTEM_CONFCHG_CALLBACK:
+				if (cpg_inst_copy.model_v1_data.cpg_totem_confchg_fn == NULL) {
+					break;
+				}
+
+				res_cpg_totem_confchg_callback = (struct res_lib_cpg_totem_confchg_callback *)dispatch_data;
+
+				marshall_from_mar_cpg_ring_id_t (&ring_id, &res_cpg_totem_confchg_callback->ring_id);
+				for (i = 0; i < res_cpg_totem_confchg_callback->member_list_entries; i++) {
+					totem_member_list[i] = res_cpg_totem_confchg_callback->member_list[i];
+				}
+
+				cpg_inst_copy.model_v1_data.cpg_totem_confchg_fn (handle,
+					ring_id,
+					res_cpg_totem_confchg_callback->member_list_entries,
+					totem_member_list);
+				break;
+			default:
+				error = CS_ERR_LIBRARY;
+				goto error_put;
+				break;
+			} /* - switch (dispatch_data->id) */
+			break; /* case CPG_MODEL_V1 */
+		} /* - switch (cpg_inst_copy.model_data.model) */
+
+		if (cpg_inst_copy.finalize || cpg_inst->finalize) {
+			/*
+			 * If the finalize has been called then get out of the dispatch.
+			 */
+			cpg_inst->finalize = 1;
+			error = CS_ERR_BAD_HANDLE;
 			goto error_put;
-			break;
 		}
-		coroipcc_dispatch_put (cpg_inst->handle);
 
 		/*
 		 * Determine if more messages should be processed
 		 */
-		if (dispatch_types == CS_DISPATCH_ONE) {
+		if (dispatch_types == CS_DISPATCH_ONE || dispatch_types == CS_DISPATCH_ONE_NONBLOCKING) {
 			cont = 0;
 		}
 	} while (cont);
@@ -423,7 +594,11 @@ cs_error_t cpg_join (
 	struct cpg_inst *cpg_inst;
 	struct iovec iov[2];
 	struct req_lib_cpg_join req_lib_cpg_join;
-	struct res_lib_cpg_join res_lib_cpg_join;
+	struct res_lib_cpg_join response;
+
+	if (group->length > CPG_MAX_NAME_LENGTH) {
+		return (CS_ERR_NAME_TOO_LONG);
+	}
 
 	error = hdb_error_to_cs (hdb_handle_get (&cpg_handle_t_db, handle, (void *)&cpg_inst));
 	if (error != CS_OK) {
@@ -434,6 +609,14 @@ cs_error_t cpg_join (
 	req_lib_cpg_join.header.size = sizeof (struct req_lib_cpg_join);
 	req_lib_cpg_join.header.id = MESSAGE_REQ_CPG_JOIN;
 	req_lib_cpg_join.pid = getpid();
+	req_lib_cpg_join.flags = 0;
+
+	switch (cpg_inst->model_data.model) {
+	case CPG_MODEL_V1:
+		req_lib_cpg_join.flags = cpg_inst->model_v1_data.flags;
+		break;
+	}
+
 	marshall_to_mar_cpg_name_t (&req_lib_cpg_join.group_name,
 		group);
 
@@ -441,15 +624,15 @@ cs_error_t cpg_join (
 	iov[0].iov_len = sizeof (struct req_lib_cpg_join);
 
 	do {
-		error = coroipcc_msg_send_reply_receive (cpg_inst->handle, iov, 1,
-			&res_lib_cpg_join, sizeof (struct res_lib_cpg_join));
+		error = coroipcc_msg_send_reply_receive (cpg_inst->c, iov, 1,
+			&response, sizeof (struct res_lib_cpg_join));
 
 		if (error != CS_OK) {
 			goto error_exit;
 		}
-	} while (res_lib_cpg_join.header.error == CPG_ERR_BUSY);
+	} while (response.header.error == CS_ERR_BUSY);
 
-	error = res_lib_cpg_join.header.error;
+	error = response.header.error;
 
 error_exit:
 	hdb_handle_put (&cpg_handle_t_db, handle);
@@ -467,6 +650,10 @@ cs_error_t cpg_leave (
 	struct req_lib_cpg_leave req_lib_cpg_leave;
 	struct res_lib_cpg_leave res_lib_cpg_leave;
 
+        if (group->length > CPG_MAX_NAME_LENGTH) {
+		return (CS_ERR_NAME_TOO_LONG);
+        }
+
 	error = hdb_error_to_cs (hdb_handle_get (&cpg_handle_t_db, handle, (void *)&cpg_inst));
 	if (error != CS_OK) {
 		return (error);
@@ -482,13 +669,13 @@ cs_error_t cpg_leave (
 	iov[0].iov_len = sizeof (struct req_lib_cpg_leave);
 
 	do {
-		error = coroipcc_msg_send_reply_receive (cpg_inst->handle, iov, 1,
+		error = coroipcc_msg_send_reply_receive (cpg_inst->c, iov, 1,
 			&res_lib_cpg_leave, sizeof (struct res_lib_cpg_leave));
 
 		if (error != CS_OK) {
 			goto error_exit;
 		}
-	} while (res_lib_cpg_leave.header.error == CPG_ERR_BUSY);
+	} while (res_lib_cpg_leave.header.error == CS_ERR_BUSY);
 
 	error = res_lib_cpg_leave.header.error;
 
@@ -507,38 +694,49 @@ cs_error_t cpg_membership_get (
 	cs_error_t error;
 	struct cpg_inst *cpg_inst;
 	struct iovec iov;
-	struct req_lib_cpg_membership req_lib_cpg_membership_get;
-	struct res_lib_cpg_confchg_callback res_lib_cpg_membership_get;
+	struct req_lib_cpg_membership_get req_lib_cpg_membership_get;
+	struct res_lib_cpg_membership_get res_lib_cpg_membership_get;
 	unsigned int i;
+
+	if (group_name->length > CPG_MAX_NAME_LENGTH) {
+		return (CS_ERR_NAME_TOO_LONG);
+	}
+	if (member_list == NULL) {
+		return (CS_ERR_INVALID_PARAM);
+	}
+	if (member_list_entries == NULL) {
+		return (CS_ERR_INVALID_PARAM);
+	}
 
 	error = hdb_error_to_cs (hdb_handle_get (&cpg_handle_t_db, handle, (void *)&cpg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
 
-	req_lib_cpg_membership_get.header.size = sizeof (coroipc_request_header_t);
+	req_lib_cpg_membership_get.header.size = sizeof (struct req_lib_cpg_membership_get);
 	req_lib_cpg_membership_get.header.id = MESSAGE_REQ_CPG_MEMBERSHIP;
 
+	marshall_to_mar_cpg_name_t (&req_lib_cpg_membership_get.group_name,
+		group_name);
+
 	iov.iov_base = (void *)&req_lib_cpg_membership_get;
-	iov.iov_len = sizeof (coroipc_request_header_t);
+	iov.iov_len = sizeof (struct req_lib_cpg_membership_get);
 
-	do {
-		error = coroipcc_msg_send_reply_receive (cpg_inst->handle, &iov, 1,
-			&res_lib_cpg_membership_get, sizeof (coroipc_response_header_t));
+	error = coroipcc_msg_send_reply_receive (cpg_inst->c, &iov, 1,
+			&res_lib_cpg_membership_get, sizeof (res_lib_cpg_membership_get));
 
- 		if (error != CS_OK) {
- 			goto error_exit;
-		}
-	} while (res_lib_cpg_membership_get.header.error == CPG_ERR_BUSY);
+	if (error != CS_OK) {
+		goto error_exit;
+	}
 
 	error = res_lib_cpg_membership_get.header.error;
 
 	/*
 	 * Copy results to caller
 	 */
-	*member_list_entries = res_lib_cpg_membership_get.member_list_entries;
+	*member_list_entries = res_lib_cpg_membership_get.member_count;
 	if (member_list) {
-		for (i = 0; i < res_lib_cpg_membership_get.member_list_entries; i++) {
+		for (i = 0; i < res_lib_cpg_membership_get.member_count; i++) {
 			marshall_from_mar_cpg_address_t (&member_list[i],
 				&res_lib_cpg_membership_get.member_list[i]);
 		}
@@ -565,13 +763,13 @@ cs_error_t cpg_local_get (
 		return (error);
 	}
 
-	req_lib_cpg_local_get.header.size = sizeof (coroipc_request_header_t);
+	req_lib_cpg_local_get.header.size = sizeof (struct qb_ipc_request_header);
 	req_lib_cpg_local_get.header.id = MESSAGE_REQ_CPG_LOCAL_GET;
 
 	iov.iov_base = (void *)&req_lib_cpg_local_get;
 	iov.iov_len = sizeof (struct req_lib_cpg_local_get);
 
-	error = coroipcc_msg_send_reply_receive (cpg_inst->handle, &iov, 1,
+	error = coroipcc_msg_send_reply_receive (cpg_inst->c, &iov, 1,
 		&res_lib_cpg_local_get, sizeof (res_lib_cpg_local_get));
 
 	if (error != CS_OK) {
@@ -599,12 +797,91 @@ cs_error_t cpg_flow_control_state_get (
 	if (error != CS_OK) {
 		return (error);
 	}
-
-	error = coroipcc_dispatch_flow_control_get (cpg_inst->handle, (unsigned int *)flow_control_state);
+	*flow_control_state = CPG_FLOW_CONTROL_DISABLED;
+	error = CS_OK;
 
 	hdb_handle_put (&cpg_handle_t_db, handle);
 
 	return (error);
+}
+
+static int
+memory_map (char *path, const char *file, void **buf, size_t bytes)
+{
+	int32_t fd;
+	void *addr;
+	int32_t res;
+	char *buffer;
+	int32_t i;
+	size_t written;
+	size_t page_size; 
+	long int sysconf_page_size;
+	mode_t old_umask;
+
+	snprintf (path, PATH_MAX, "/dev/shm/%s", file);
+
+	old_umask = umask(CPG_MEMORY_MAP_UMASK);
+	fd = mkstemp (path);
+	(void)umask(old_umask);
+	if (fd == -1) {
+		snprintf (path, PATH_MAX, LOCALSTATEDIR "/run/%s", file);
+		old_umask = umask(CPG_MEMORY_MAP_UMASK);
+		fd = mkstemp (path);
+		(void)umask(old_umask);
+		if (fd == -1) {
+			return (-1);
+		}
+	}
+
+	res = ftruncate (fd, bytes);
+	if (res == -1) {
+		goto error_close_unlink;
+	}
+	sysconf_page_size = sysconf(_SC_PAGESIZE);
+	if (sysconf_page_size <= 0) {
+		goto error_close_unlink;
+	}
+	page_size = sysconf_page_size;
+	buffer = malloc (page_size);
+	if (buffer == NULL) {
+		goto error_close_unlink;
+	}
+	memset (buffer, 0, page_size);
+	for (i = 0; i < (bytes / page_size); i++) {
+retry_write:
+		written = write (fd, buffer, page_size);
+		if (written == -1 && errno == EINTR) {
+			goto retry_write;
+		}
+		if (written != page_size) {
+			free (buffer);
+			goto error_close_unlink;
+		}
+	}
+	free (buffer);
+
+	addr = mmap (NULL, bytes, PROT_READ | PROT_WRITE,
+		MAP_SHARED, fd, 0);
+
+	if (addr == MAP_FAILED) {
+		goto error_close_unlink;
+	}
+#ifdef MADV_NOSYNC
+	madvise(addr, bytes, MADV_NOSYNC);
+#endif
+
+	res = close (fd);
+	if (res) {
+		return (-1);
+	}
+	*buf = addr;
+
+	return 0;
+
+error_close_unlink:
+	close (fd);
+	unlink(path);
+	return -1;
 }
 
 cs_error_t cpg_zcb_alloc (
@@ -612,6 +889,13 @@ cs_error_t cpg_zcb_alloc (
 	size_t size,
 	void **buffer)
 {
+	void *buf = NULL;
+	char path[PATH_MAX];
+	mar_req_coroipcc_zc_alloc_t req_coroipcc_zc_alloc;
+	struct qb_ipc_response_header res_coroipcs_zc_alloc;
+	size_t map_size;
+	struct iovec iovec;
+	struct coroipcs_zc_header *hdr;
 	cs_error_t error;
 	struct cpg_inst *cpg_inst;
 
@@ -620,14 +904,40 @@ cs_error_t cpg_zcb_alloc (
 		return (error);
 	}
 
-	error = coroipcc_zcb_alloc (cpg_inst->handle,
-		buffer,
-		size,
-		sizeof (struct req_lib_cpg_mcast));
+	map_size = size + sizeof (struct req_lib_cpg_mcast) + sizeof (struct coroipcs_zc_header);
+	assert(memory_map (path, "corosync_zerocopy-XXXXXX", &buf, map_size) != -1);
 
+	if (strlen(path) >= CPG_ZC_PATH_LEN) {
+		unlink(path);
+		munmap (buf, map_size);
+		return (CS_ERR_NAME_TOO_LONG);
+	}
+
+	req_coroipcc_zc_alloc.header.size = sizeof (mar_req_coroipcc_zc_alloc_t);
+	req_coroipcc_zc_alloc.header.id = MESSAGE_REQ_CPG_ZC_ALLOC;
+	req_coroipcc_zc_alloc.map_size = map_size;
+	strcpy (req_coroipcc_zc_alloc.path_to_file, path);
+
+	iovec.iov_base = (void *)&req_coroipcc_zc_alloc;
+	iovec.iov_len = sizeof (mar_req_coroipcc_zc_alloc_t);
+
+	error = coroipcc_msg_send_reply_receive (
+		cpg_inst->c,
+		&iovec,
+		1,
+		&res_coroipcs_zc_alloc,
+		sizeof (struct qb_ipc_response_header));
+
+	if (error != CS_OK) {
+		goto error_exit;
+	}
+
+	hdr = (struct coroipcs_zc_header *)buf;
+	hdr->map_size = map_size;
+	*buffer = ((char *)buf) + sizeof (struct coroipcs_zc_header) + sizeof (struct req_lib_cpg_mcast);
+
+error_exit:
 	hdb_handle_put (&cpg_handle_t_db, handle);
-	*buffer = ((char *)*buffer) + sizeof (struct req_lib_cpg_mcast);
-
 	return (error);
 }
 
@@ -636,15 +946,45 @@ cs_error_t cpg_zcb_free (
 	void *buffer)
 {
 	cs_error_t error;
+	unsigned int res;
 	struct cpg_inst *cpg_inst;
+	mar_req_coroipcc_zc_free_t req_coroipcc_zc_free;
+	struct qb_ipc_response_header res_coroipcs_zc_free;
+	struct iovec iovec;
+	struct coroipcs_zc_header *header = (struct coroipcs_zc_header *)((char *)buffer - sizeof (struct coroipcs_zc_header) - sizeof (struct req_lib_cpg_mcast));
 
 	error = hdb_error_to_cs (hdb_handle_get (&cpg_handle_t_db, handle, (void *)&cpg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
 
-	coroipcc_zcb_free (cpg_inst->handle, ((char *)buffer) - sizeof (struct req_lib_cpg_mcast));
+	req_coroipcc_zc_free.header.size = sizeof (mar_req_coroipcc_zc_free_t);
+	req_coroipcc_zc_free.header.id = MESSAGE_REQ_CPG_ZC_FREE;
+	req_coroipcc_zc_free.map_size = header->map_size;
+	req_coroipcc_zc_free.server_address = header->server_address;
 
+	iovec.iov_base = (void *)&req_coroipcc_zc_free;
+	iovec.iov_len = sizeof (mar_req_coroipcc_zc_free_t);
+
+	error = coroipcc_msg_send_reply_receive (
+		cpg_inst->c,
+		&iovec,
+		1,
+		&res_coroipcs_zc_free,
+		sizeof (struct qb_ipc_response_header));
+
+	if (error != CS_OK) {
+		goto error_exit;
+	}
+
+	res = munmap ((void *)header, header->map_size);
+	if (res == -1) {
+		error = qb_to_cs_error(-errno);
+
+		goto error_exit;
+	}
+
+error_exit:
 	hdb_handle_put (&cpg_handle_t_db, handle);
 
 	return (error);
@@ -660,10 +1000,18 @@ cs_error_t cpg_zcb_mcast_joined (
 	struct cpg_inst *cpg_inst;
 	struct req_lib_cpg_mcast *req_lib_cpg_mcast;
 	struct res_lib_cpg_mcast res_lib_cpg_mcast;
+	mar_req_coroipcc_zc_execute_t req_coroipcc_zc_execute;
+	struct coroipcs_zc_header *hdr;
+	struct iovec iovec;
 
 	error = hdb_error_to_cs (hdb_handle_get (&cpg_handle_t_db, handle, (void *)&cpg_inst));
 	if (error != CS_OK) {
 		return (error);
+	}
+
+	if (msg_len > IPC_REQUEST_SIZE) {
+		error = CS_ERR_TOO_BIG;
+		goto error_exit;
 	}
 
 	req_lib_cpg_mcast = (struct req_lib_cpg_mcast *)(((char *)msg) - sizeof (struct req_lib_cpg_mcast));
@@ -674,11 +1022,21 @@ cs_error_t cpg_zcb_mcast_joined (
 	req_lib_cpg_mcast->guarantee = guarantee;
 	req_lib_cpg_mcast->msglen = msg_len;
 
-	error = coroipcc_zcb_msg_send_reply_receive (
-		cpg_inst->handle,
-		req_lib_cpg_mcast,
+	hdr = (struct coroipcs_zc_header *)(((char *)req_lib_cpg_mcast) - sizeof (struct coroipcs_zc_header));
+
+	req_coroipcc_zc_execute.header.size = sizeof (mar_req_coroipcc_zc_execute_t);
+	req_coroipcc_zc_execute.header.id = MESSAGE_REQ_CPG_ZC_EXECUTE;
+	req_coroipcc_zc_execute.server_address = hdr->server_address;
+
+	iovec.iov_base = (void *)&req_coroipcc_zc_execute;
+	iovec.iov_len = sizeof (mar_req_coroipcc_zc_execute_t);
+
+	error = coroipcc_msg_send_reply_receive (
+		cpg_inst->c,
+		&iovec,
+		1,
 		&res_lib_cpg_mcast,
-		sizeof (res_lib_cpg_mcast));
+		sizeof(res_lib_cpg_mcast));
 
 	if (error != CS_OK) {
 		goto error_exit;
@@ -692,6 +1050,88 @@ error_exit:
 	return (error);
 }
 
+static cs_error_t send_fragments (
+	struct cpg_inst *cpg_inst,
+	cpg_guarantee_t guarantee,
+	size_t msg_len,
+	const struct iovec *iovec,
+	unsigned int iov_len)
+{
+	int i;
+	cs_error_t error = CS_OK;
+	struct iovec iov[2];
+	struct req_lib_cpg_partial_mcast req_lib_cpg_mcast;
+	struct res_lib_cpg_partial_send res_lib_cpg_partial_send;
+	size_t sent = 0;
+	size_t iov_sent = 0;
+	int retry_count;
+
+	req_lib_cpg_mcast.header.id = MESSAGE_REQ_CPG_PARTIAL_MCAST;
+	req_lib_cpg_mcast.guarantee = guarantee;
+	req_lib_cpg_mcast.msglen = msg_len;
+
+	iov[0].iov_base = (void *)&req_lib_cpg_mcast;
+	iov[0].iov_len = sizeof (struct req_lib_cpg_partial_mcast);
+
+	i=0;
+	iov_sent = 0 ;
+	qb_ipcc_fc_enable_max_set(cpg_inst->c,  2);
+
+	while (error == CS_OK && sent < msg_len) {
+
+		retry_count = 0;
+		if ( (iovec[i].iov_len - iov_sent) > cpg_inst->max_msg_size) {
+			iov[1].iov_len = cpg_inst->max_msg_size;
+		}
+		else {
+			iov[1].iov_len = iovec[i].iov_len - iov_sent;
+		}
+
+		if (sent == 0) {
+			req_lib_cpg_mcast.type = LIBCPG_PARTIAL_FIRST;
+		}
+		else if ((sent + iov[1].iov_len) == msg_len) {
+			req_lib_cpg_mcast.type = LIBCPG_PARTIAL_LAST;
+		}
+		else {
+			req_lib_cpg_mcast.type = LIBCPG_PARTIAL_CONTINUED;
+		}
+
+		req_lib_cpg_mcast.fraglen = iov[1].iov_len;
+		req_lib_cpg_mcast.header.size = sizeof (struct req_lib_cpg_partial_mcast) + iov[1].iov_len;
+		iov[1].iov_base = (char *)iovec[i].iov_base + iov_sent;
+
+	resend:
+		error = coroipcc_msg_send_reply_receive (cpg_inst->c, iov, 2,
+							 &res_lib_cpg_partial_send,
+							 sizeof (res_lib_cpg_partial_send));
+
+		if (error == CS_ERR_TRY_AGAIN) {
+			fprintf(stderr, "sleep. counter=%d\n", retry_count);
+			if (++retry_count > MAX_RETRIES) {
+				goto error_exit;
+			}
+			usleep(10000);
+			goto resend;
+		}
+
+		iov_sent += iov[1].iov_len;
+		sent += iov[1].iov_len;
+
+		/* Next iovec */
+		if (iov_sent >= iovec[i].iov_len) {
+			i++;
+			iov_sent = 0;
+		}
+		error = res_lib_cpg_partial_send.header.error;
+	}
+error_exit:
+	qb_ipcc_fc_enable_max_set(cpg_inst->c,  1);
+
+	return error;
+}
+
+
 cs_error_t cpg_mcast_joined (
 	cpg_handle_t handle,
 	cpg_guarantee_t guarantee,
@@ -703,7 +1143,6 @@ cs_error_t cpg_mcast_joined (
 	struct cpg_inst *cpg_inst;
 	struct iovec iov[64];
 	struct req_lib_cpg_mcast req_lib_cpg_mcast;
-	struct res_lib_cpg_mcast res_lib_cpg_mcast;
 	size_t msg_len = 0;
 
 	error = hdb_error_to_cs (hdb_handle_get (&cpg_handle_t_db, handle, (void *)&cpg_inst));
@@ -713,6 +1152,11 @@ cs_error_t cpg_mcast_joined (
 
 	for (i = 0; i < iov_len; i++ ) {
 		msg_len += iovec[i].iov_len;
+	}
+
+	if (msg_len > cpg_inst->max_msg_size) {
+		error = send_fragments(cpg_inst, guarantee, msg_len, iovec, iov_len);
+		goto error_exit;
 	}
 
 	req_lib_cpg_mcast.header.size = sizeof (struct req_lib_cpg_mcast) +
@@ -726,14 +1170,9 @@ cs_error_t cpg_mcast_joined (
 	iov[0].iov_len = sizeof (struct req_lib_cpg_mcast);
 	memcpy (&iov[1], iovec, iov_len * sizeof (struct iovec));
 
-	error = coroipcc_msg_send_reply_receive (cpg_inst->handle, iov,
-		iov_len + 1, &res_lib_cpg_mcast, sizeof (res_lib_cpg_mcast));
-
-	if (error != CS_OK) {
-		goto error_exit;
-	}
-
-	error = res_lib_cpg_mcast.header.error;
+	qb_ipcc_fc_enable_max_set(cpg_inst->c,  2);
+	error = qb_to_cs_error(qb_ipcc_sendv(cpg_inst->c, iov, iov_len + 1));
+	qb_ipcc_fc_enable_max_set(cpg_inst->c,  1);
 
 error_exit:
 	hdb_handle_put (&cpg_handle_t_db, handle);
@@ -754,6 +1193,9 @@ cs_error_t cpg_iteration_initialize(
 	struct req_lib_cpg_iterationinitialize req_lib_cpg_iterationinitialize;
 	struct res_lib_cpg_iterationinitialize res_lib_cpg_iterationinitialize;
 
+	if (group && group->length > CPG_MAX_NAME_LENGTH) {
+		return (CS_ERR_NAME_TOO_LONG);
+	}
 	if (cpg_iteration_handle == NULL) {
 		return (CS_ERR_INVALID_PARAM);
 	}
@@ -786,7 +1228,7 @@ cs_error_t cpg_iteration_initialize(
 		goto error_destroy;
 	}
 
-	cpg_iteration_instance->conn_handle = cpg_inst->handle;
+	cpg_iteration_instance->conn = cpg_inst->c;
 
 	list_init (&cpg_iteration_instance->list);
 
@@ -800,7 +1242,7 @@ cs_error_t cpg_iteration_initialize(
 	iov.iov_base = (void *)&req_lib_cpg_iterationinitialize;
 	iov.iov_len = sizeof (struct req_lib_cpg_iterationinitialize);
 
-	error = coroipcc_msg_send_reply_receive (cpg_inst->handle,
+	error = coroipcc_msg_send_reply_receive (cpg_inst->c,
 		&iov,
 		1,
 		&res_lib_cpg_iterationinitialize,
@@ -838,9 +1280,7 @@ cs_error_t cpg_iteration_next(
 	cs_error_t error;
 	struct cpg_iteration_instance_t *cpg_iteration_instance;
 	struct req_lib_cpg_iterationnext req_lib_cpg_iterationnext;
-	struct res_lib_cpg_iterationnext *res_lib_cpg_iterationnext;
-	struct iovec iov;
-	void *return_address;
+	struct res_lib_cpg_iterationnext res_lib_cpg_iterationnext;
 
 	if (description == NULL) {
 		return CS_ERR_INVALID_PARAM;
@@ -856,27 +1296,25 @@ cs_error_t cpg_iteration_next(
 	req_lib_cpg_iterationnext.header.id = MESSAGE_REQ_CPG_ITERATIONNEXT;
 	req_lib_cpg_iterationnext.iteration_handle = cpg_iteration_instance->executive_iteration_handle;
 
-	iov.iov_base = (void *)&req_lib_cpg_iterationnext;
-	iov.iov_len = sizeof (struct req_lib_cpg_iterationnext);
+	error = qb_to_cs_error (qb_ipcc_send (cpg_iteration_instance->conn,
+				&req_lib_cpg_iterationnext,
+				req_lib_cpg_iterationnext.header.size));
+	if (error != CS_OK) {
+		goto error_put;
+	}
 
-	error = coroipcc_msg_send_reply_receive_in_buf_get (cpg_iteration_instance->conn_handle,
-		&iov,
-		1,
-		&return_address);
-	res_lib_cpg_iterationnext = return_address;
-
+	error = qb_to_cs_error (qb_ipcc_recv (cpg_iteration_instance->conn,
+				&res_lib_cpg_iterationnext,
+				sizeof(struct res_lib_cpg_iterationnext), -1));
 	if (error != CS_OK) {
 		goto error_put;
 	}
 
 	marshall_from_mar_cpg_iteration_description_t(
 			description,
-			&res_lib_cpg_iterationnext->description);
+			&res_lib_cpg_iterationnext.description);
 
-	error = res_lib_cpg_iterationnext->header.error;
-
-	coroipcc_msg_send_reply_receive_in_buf_put(
-			cpg_iteration_instance->conn_handle);
+	error = res_lib_cpg_iterationnext.header.error;
 
 error_put:
 	hdb_handle_put (&cpg_iteration_handle_t_db, handle);
@@ -907,7 +1345,7 @@ cs_error_t cpg_iteration_finalize (
 	iov.iov_base = (void *)&req_lib_cpg_iterationfinalize;
 	iov.iov_len = sizeof (struct req_lib_cpg_iterationfinalize);
 
-	error = coroipcc_msg_send_reply_receive (cpg_iteration_instance->conn_handle,
+	error = coroipcc_msg_send_reply_receive (cpg_iteration_instance->conn,
 		&iov,
 		1,
 		&res_lib_cpg_iterationfinalize,

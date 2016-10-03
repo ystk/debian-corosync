@@ -29,24 +29,52 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 # THE POSSIBILITY OF SUCH DAMAGE.
 
-MAINTAINERCLEANFILES    = Makefile.in
-INCLUDES       		= -I$(top_builddir)/include  -I$(top_srcdir)/include
+MAINTAINERCLEANFILES	= Makefile.in
 
-sbin_PROGRAMS		= corosync-fplay corosync-cfgtool \
-			  corosync-keygen corosync-objctl \
-			  corosync-pload corosync-cpgtool corosync-quorumtool
+sbin_PROGRAMS		= corosync-cfgtool \
+			  corosync-keygen \
+			  corosync-cpgtool corosync-quorumtool \
+			  corosync-notifyd corosync-cmapctl
 
-corosync_pload_LDADD	= -lpload -lcoroipcc
-corosync_pload_LDFLAGS	= -L../lib
-corosync_objctl_LDADD	= -lconfdb ../lcr/liblcr.a -lcoroipcc
-corosync_objctl_LDFLAGS	= -L../lib
-corosync_cfgtool_LDADD	= -lcfg -lcoroipcc
-corosync_cfgtool_LDFLAGS= -L../lib
-corosync_cpgtool_LDADD	= -lcfg -lcpg -lcoroipcc
-corosync_cpgtool_LDFLAGS= -L../lib
-corosync_quorumtool_LDADD = -lconfdb -lcfg -lquorum \
-			    -lvotequorum -lcoroipcc ../lcr/liblcr.a
-corosync_quorumtool_LDFLAGS = -L../lib
+bin_SCRIPTS		= corosync-blackbox
+
+if INSTALL_XMLCONF
+bin_SCRIPTS		+= corosync-xmlproc
+endif
+
+EXTRA_DIST		= $(bin_SCRIPTS) corosync-xmlproc.sh \
+			  corosync-notifyd.sysconfig.example \
+                          corosync-blackbox.sh
+
+corosync-xmlproc: corosync-xmlproc.sh
+	sed -e 's#@''DATADIR@#${datadir}#g' \
+	    -e 's#@''BASHPATH@#${BASHPATH}#g' \
+	    $< > $@
+
+corosync-blackbox: corosync-blackbox.sh
+	sed -e 's#@''LOCALSTATEDIR@#${localstatedir}#g' $< > $@
+
+corosync_cmapctl_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libcmap.la
+
+corosync_cfgtool_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libcfg.la
+
+corosync_cpgtool_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libcfg.la \
+			  $(top_builddir)/lib/libcpg.la
+
+corosync_quorumtool_LDADD = $(LIBQB_LIBS) \
+			    $(top_builddir)/lib/libcmap.la \
+			    $(top_builddir)/lib/libcfg.la \
+			    $(top_builddir)/lib/libquorum.la \
+			    $(top_builddir)/lib/libvotequorum.la
+
+corosync_notifyd_CFLAGS   = $(DBUS_CFLAGS)
+corosync_notifyd_LDADD    = $(LIBQB_LIBS) $(DBUS_LIBS) $(SNMP_LIBS) \
+			    $(top_builddir)/lib/libcmap.la \
+			    $(top_builddir)/lib/libcfg.la \
+			    $(top_builddir)/lib/libquorum.la
 
 lint:
-	-splint $(LINT_FLAGS) $(CFLAGS) *.c
+	-splint $(LINT_FLAGS) $(DBUS_CFLAGS) $(CPPFLAGS) $(CFLAGS) *.c
+
+clean-local:
+	rm -f corosync-xmlproc corosync-blackbox

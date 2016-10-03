@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2002-2004 MontaVista Software, Inc.
  * Copyright (c) 2004 Open Source Development Lab
- * Copyright (c) 2006-2007, 2009 Red Hat, Inc.
+ * Copyright (c) 2006-2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -44,12 +44,44 @@
 #include <assert.h>
 
 #include <corosync/corotypes.h>
+#include <corosync/corodefs.h>
 #include <corosync/list.h>
-#include <corosync/engine/logsys.h>
-#include <corosync/coroipc_types.h>
+#include <corosync/logsys.h>
 #include "util.h"
 
 LOGSYS_DECLARE_SUBSYS ("MAIN");
+
+struct service_names {
+	const char *c_name;
+	int32_t c_val;
+};
+
+static struct service_names servicenames[] =
+{
+	{ "CFG", CFG_SERVICE },
+	{ "CPG", CPG_SERVICE },
+	{ "QUORUM", QUORUM_SERVICE },
+	{ "PLOAD", PLOAD_SERVICE },
+	{ "VOTEQUORUM", VOTEQUORUM_SERVICE },
+	{ "MON", MON_SERVICE },
+	{ "WD", WD_SERVICE },
+	{ "CMAP", CMAP_SERVICE },
+	{ NULL, -1 }
+};
+
+const char * short_service_name_get(uint32_t service_id,
+	char *buf, size_t buf_size)
+{
+	uint32_t i;
+
+	for (i = 0; servicenames[i].c_name != NULL; i++) {
+		if (service_id == servicenames[i].c_val) {
+			return (servicenames[i].c_name);
+		}
+	}
+	snprintf(buf, buf_size, "%d", service_id);
+	return buf;
+}
 
 /*
  * Compare two names.  returns non-zero on match.
@@ -81,6 +113,7 @@ cs_time_t clust_time_now(void)
 	return time_now;
 }
 
+void _corosync_out_of_memory_error (void) __attribute__((noreturn));
 void _corosync_out_of_memory_error (void)
 {
 	assert (0==1);
@@ -88,13 +121,19 @@ void _corosync_out_of_memory_error (void)
 }
 
 void _corosync_exit_error (
-	enum e_ais_done err, const char *file, unsigned int line)
+	enum e_corosync_done err, const char *file, unsigned int line)  __attribute__((noreturn));
+
+void _corosync_exit_error (
+	enum e_corosync_done err, const char *file, unsigned int line)
 {
-	log_printf (LOGSYS_LEVEL_ERROR, "Corosync Cluster Engine exiting "
-		"with status %d at %s:%u.\n", err, file, line);
-	logsys_fork_completed ();
-	logsys_flush ();
-	logsys_atexit ();
+	if (err == COROSYNC_DONE_EXIT) {
+		log_printf (LOGSYS_LEVEL_NOTICE,
+			"Corosync Cluster Engine exiting normally");
+	} else {
+		log_printf (LOGSYS_LEVEL_ERROR, "Corosync Cluster Engine exiting "
+			"with status %d at %s:%u.", err, file, line);
+	}
+	logsys_system_fini ();
 	exit (err);
 }
 
@@ -114,7 +153,8 @@ char *getcs_name_t (cs_name_t *name)
 }
 
 void setcs_name_t (cs_name_t *name, char *str) {
-	strncpy ((char *)name->value, str, CS_MAX_NAME_LENGTH);
+	strncpy ((char *)name->value, str, sizeof (name->value));
+	((char *)name->value)[sizeof (name->value) - 1] = '\0';
 	if (strlen ((char *)name->value) > CS_MAX_NAME_LENGTH) {
 		name->length = CS_MAX_NAME_LENGTH;
 	} else {
@@ -129,4 +169,25 @@ int cs_name_tisEqual (cs_name_t *str1, char *str2) {
 	} else {
 		return 0;
 	}
+}
+
+const char *get_run_dir(void)
+{
+	static char path[PATH_MAX] = {'\0'};
+	char *env_run_dir;
+	int res;
+
+	if (path[0] == '\0') {
+		env_run_dir = getenv("COROSYNC_RUN_DIR");
+
+		if (env_run_dir != NULL && env_run_dir[0] != '\0') {
+			res = snprintf(path, PATH_MAX, "%s", getenv("COROSYNC_RUN_DIR"));
+		} else {
+			res = snprintf(path, PATH_MAX, "%s/%s", LOCALSTATEDIR, "lib/corosync");
+		}
+
+		assert(res < PATH_MAX);
+	}
+
+	return (path);
 }

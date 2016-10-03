@@ -30,71 +30,48 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 # THE POSSIBILITY OF SUCH DAMAGE.
 
-MAINTAINERCLEANFILES    = Makefile.in
-INCLUDES       		= -I$(top_builddir)/include/corosync -I$(top_srcdir)/include
+MAINTAINERCLEANFILES	= Makefile.in
 
-noinst_PROGRAMS		= testevs evsbench evsverify cpgverify testcpg testcpg2 cpgbench testconfdb	\
-			logsysbench logsysrec testquorum testvotequorum1 testvotequorum2	\
-			logsys_s logsys_t1 logsys_t2 testcpgzc cpgbenchzc testzcgc \
-			stress_cpgzc stress_cpgfdget stress_cpgcontext cpgbound testsam
+EXTRA_DIST		= ploadstart.sh
 
-testevs_LDADD		= -levs -lcoroipcc
-testevs_LDFLAGS		= -L../lib
-testcpg_LDADD		= -lcpg -lcoroipcc
-testcpg_LDFLAGS		= -L../lib
-testcpg2_LDADD		= -lcpg -lcoroipcc
-testcpg2_LDFLAGS	= -L../lib
-testcpgzc_LDADD		= -lcpg -lcoroipcc
-testcpgzc_LDFLAGS	= -L../lib
-testzcgc_LDADD		= -lcpg -lcoroipcc
-testzcgc_LDFLAGS	= -L../lib
-stress_cpgzc_LDADD	= -lcpg -lcoroipcc
-stress_cpgzc_LDFLAGS	= -L../lib
-stress_cpgfdget_LDADD	= -lcpg -lcoroipcc
-stress_cpgfdget_LDFLAGS	= -L../lib
-stress_cpgcontext_LDADD	= -lcpg -lcoroipcc
-stress_cpgcontext_LDFLAGS	= -L../lib
-testconfdb_LDADD	= -lconfdb ../lcr/liblcr.a -lcoroipcc
-testconfdb_LDFLAGS	= -L../lib
-testquorum_LDADD	= -lquorum -lcoroipcc
-testquorum_LDFLAGS	= -L../lib
-testvotequorum1_LDADD	= -lvotequorum -lcoroipcc
-testvotequorum1_LDFLAGS	= -L../lib
-testvotequorum2_LDADD	= -lvotequorum -lcoroipcc
-testvotequorum2_LDFLAGS	= -L../lib
-evsverify_LDADD		= -levs -ltotem_pg -lcoroipcc
-evsverify_LDFLAGS	= -L../lib -L../exec
-cpgverify_LDADD		= -lcpg -ltotem_pg -lcoroipcc
-cpgverify_LDFLAGS	= -L../lib -L../exec
-cpgbound_LDADD		= -lcpg -lcoroipcc
-cpgbound_LDFLAGS	= -L../lib
-evsbench_LDADD		= -levs -lcoroipcc
-evsbench_LDFLAGS	= -L../lib
-cpgbench_LDADD		= -lcpg -lcoroipcc
-cpgbench_LDFLAGS	= -L../lib
-cpgbenchzc_LDADD	= -lcpg -lcoroipcc
-cpgbenchzc_LDFLAGS	= -L../lib
-logsysbench_LDADD	= -llogsys
-logsysbench_LDFLAGS	= -L../exec
-logsysrec_LDADD		= -llogsys
-logsysrec_LDFLAGS	= -L../exec
-logsys_s_SOURCES	= logsys_s.c logsys_s1.c logsys_s2.c
-logsys_s_LDADD		= -llogsys
-logsys_s_LDFLAGS	= -L../exec
-logsys_t1_LDADD		= -llogsys
-logsys_t1_LDFLAGS	= -L../exec
-logsys_t2_LDADD		= -llogsys
-logsys_t2_LDFLAGS	= -L../exec
-testsam_LDADD		= -lsam
-testsam_LDFLAGS		= -L../lib
+noinst_PROGRAMS		= cpgverify testcpg testcpg2 cpgbench \
+			  testquorum testvotequorum1 testvotequorum2	\
+			  stress_cpgfdget stress_cpgcontext cpgbound testsam \
+			  testcpgzc cpgbenchzc testzcgc stress_cpgzc
+
+noinst_SCRIPTS		= ploadstart
+
+testcpg_LDADD		= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+testcpg2_LDADD		= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+testcpgzc_LDADD		= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+testzcgc_LDADD		= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+stress_cpgzc_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+stress_cpgfdget_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+stress_cpgcontext_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+testquorum_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libquorum.la
+testvotequorum1_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libvotequorum.la
+testvotequorum2_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libvotequorum.la
+cpgverify_CPPFLAGS	= $(nss_CFLAGS)
+cpgverify_LDADD		= $(LIBQB_LIBS) $(nss_LIBS) $(top_builddir)/lib/libcpg.la
+cpgbound_LDADD		= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+cpgbench_LDADD		= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+cpgbenchzc_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la
+testsam_LDADD		= $(LIBQB_LIBS) $(top_builddir)/lib/libsam.la
+
+if BUILD_CPGHUM
+noinst_PROGRAMS	        += cpghum
+cpghum_LDADD            = $(LIBQB_LIBS) $(top_builddir)/lib/libcpg.la -lz
+endif
+
+ploadstart: ploadstart.sh
+	sed -e 's#@''BASHPATH@#${BASHPATH}#g' $< > $@
+	chmod 755 $@
 
 LINT_FILES1:=$(filter-out sa_error.c, $(wildcard *.c))
-LINT_FILES2:=$(filter-out testevsth.c, $(LINT_FILES1))
-LINT_FILES:=$(filter-out testparse.c, $(LINT_FILES2))
-
+LINT_FILES:=$(filter-out testparse.c, $(LINT_FILES1))
 
 lint:
-	-for f in $(LINT_FILES) ; do echo Splint $$f ; splint $(INCLUDES) $(LINT_FLAGS) $(CFLAGS) $$f ; done
+	-for f in $(LINT_FILES) ; do echo Splint $$f ; splint $(LINT_FLAGS) $(CPPFLAGS) $(CFLAGS) $$f ; done
 
 clean-local:
-	rm -f fdata
+	rm -f ploadstart

@@ -41,7 +41,7 @@
  * 	http://citeseer.ist.psu.edu/amir95totem.html
  *
  * The deviations from the above published protocols are:
- * - encryption of message contents with SOBER128
+ * - encryption of message contents with nss
  * - authentication of meessage contents with SHA1/HMAC
  * - token hold mode where token doesn't rotate on unused ring - reduces cpu
  *   usage on 1.6ghz xeon from 35% to less then .1 % as measured by top
@@ -72,28 +72,29 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/poll.h>
+#include <sys/uio.h>
 #include <limits.h>
 
+#include <qb/qbdefs.h>
+#include <qb/qbutil.h>
+#include <qb/qbloop.h>
+
 #include <corosync/swab.h>
-#include <corosync/cs_queue.h>
 #include <corosync/sq.h>
 #include <corosync/list.h>
-#include <corosync/hdb.h>
-#include <corosync/totem/coropoll.h>
+
 #define LOGSYS_UTILS_ONLY 1
-#include <corosync/engine/logsys.h>
+#include <corosync/logsys.h>
 
 #include "totemsrp.h"
 #include "totemrrp.h"
 #include "totemnet.h"
-#include "wthread.h"
 
-#include "crypto.h"
-#include "tlist.h"
+#include "cs_queue.h"
 
 #define LOCALHOST_IP				inet_addr("127.0.0.1")
 #define QUEUE_RTR_ITEMS_SIZE_MAX		16384 /* allow 16384 retransmit items */
-#define RETRANS_MESSAGE_QUEUE_SIZE_MAX		500 /* allow 500 messages to be queued */
+#define RETRANS_MESSAGE_QUEUE_SIZE_MAX		16384 /* allow 500 messages to be queued */
 #define RECEIVED_MESSAGE_QUEUE_SIZE_MAX		500 /* allow 500 messages to be queued */
 #define MAXIOVS					5
 #define RETRANSMIT_ENTRIES_MAX			30
@@ -109,10 +110,6 @@
  * SEQNO_START_TOKEN is the starting sequence number after a new configuration
  *	for a token.  This should remain zero, unless testing overflow in which
  *	case 07fffff00 or 0xffffff00 are good starting values.
- *
- * SEQNO_START_MSG is the starting sequence number after a new configuration
- *	This should remain zero, unless testing overflow in which case
- *	0x7ffff000 and 0xfffff000 are good values to start with
  */
 #define SEQNO_START_MSG 0x0
 #define SEQNO_START_TOKEN 0x0
@@ -156,11 +153,6 @@ enum encapsulation_type {
 /*
  * New membership algorithm local variables
  */
-struct srp_addr {
-	struct totem_ip_address addr[INTERFACE_MAX];
-};
-
-
 struct consensus_list_item {
 	struct srp_addr addr;
 	int set;
@@ -283,11 +275,6 @@ struct sort_queue_item {
 	unsigned int msg_len;
 };
 
-struct orf_token_mcast_thread_state {
-	char iobuf[9000];
-	prng_state prng_state;
-};
-
 enum memb_state {
 	MEMB_STATE_OPERATIONAL = 1,
 	MEMB_STATE_GATHER = 2,
@@ -297,6 +284,8 @@ enum memb_state {
 
 struct totemsrp_instance {
 	int iface_changes;
+
+	int failed_to_recv;
 
 	/*
 	 * Flow control mcasts and remcasts on last and current orf_token
@@ -327,6 +316,8 @@ struct totemsrp_instance {
 
 	struct srp_addr my_left_memb_list[PROCESSOR_COUNT_MAX];
 
+	unsigned int my_leave_memb_list[PROCESSOR_COUNT_MAX];
+	
 	int my_proc_list_entries;
 
 	int my_failed_list_entries;
@@ -340,6 +331,8 @@ struct totemsrp_instance {
 	int my_deliver_memb_entries;
 
 	int my_left_memb_entries;
+	
+	int my_leave_memb_entries;
 
 	struct memb_ring_id my_ring_id;
 
@@ -374,6 +367,8 @@ struct totemsrp_instance {
 	 */
 	struct cs_queue new_message_queue;
 
+	struct cs_queue new_message_queue_trans;
+
 	struct cs_queue retrans_message_queue;
 
 	struct sq regular_sort_queue;
@@ -391,7 +386,7 @@ struct totemsrp_instance {
 
 	struct list_head token_callback_sent_listhead;
 
-	char *orf_token_retransmit[TOKEN_SIZE_MAX];
+	char orf_token_retransmit[TOKEN_SIZE_MAX];
 
 	int orf_token_retransmit_size;
 
@@ -400,23 +395,23 @@ struct totemsrp_instance {
 	/*
 	 * Timers
 	 */
-	poll_timer_handle timer_pause_timeout;
+	qb_loop_timer_handle timer_pause_timeout;
 
-	poll_timer_handle timer_orf_token_timeout;
+	qb_loop_timer_handle timer_orf_token_timeout;
 
-	poll_timer_handle timer_orf_token_retransmit_timeout;
+	qb_loop_timer_handle timer_orf_token_retransmit_timeout;
 
-	poll_timer_handle timer_orf_token_hold_retransmit_timeout;
+	qb_loop_timer_handle timer_orf_token_hold_retransmit_timeout;
 
-	poll_timer_handle timer_merge_detect_timeout;
+	qb_loop_timer_handle timer_merge_detect_timeout;
 
-	poll_timer_handle memb_timer_state_gather_join_timeout;
+	qb_loop_timer_handle memb_timer_state_gather_join_timeout;
 
-	poll_timer_handle memb_timer_state_gather_consensus_timeout;
+	qb_loop_timer_handle memb_timer_state_gather_consensus_timeout;
 
-	poll_timer_handle memb_timer_state_commit_timeout;
+	qb_loop_timer_handle memb_timer_state_commit_timeout;
 
-	poll_timer_handle timer_heartbeat_timeout;
+	qb_loop_timer_handle timer_heartbeat_timeout;
 
 	/*
 	 * Function and data used to log messages
@@ -431,20 +426,23 @@ struct totemsrp_instance {
 
 	int totemsrp_log_level_debug;
 
+	int totemsrp_log_level_trace;
+
 	int totemsrp_subsys_id;
 
 	void (*totemsrp_log_printf) (
-		unsigned int rec_ident,
+		int level,
+		int sybsys,
 		const char *function,
 		const char *file,
 		int line,
-		const char *format, ...)__attribute__((format(printf, 5, 6)));;
+		const char *format, ...)__attribute__((format(printf, 6, 7)));;
 
 	enum memb_state memb_state;
 
 //TODO	struct srp_addr next_memb;
 
-	hdb_handle_t totemsrp_poll_handle;
+	qb_loop_t *totemsrp_poll_handle;
 
 	struct totem_ip_address mcast_address;
 
@@ -462,6 +460,17 @@ struct totemsrp_instance {
 		const struct memb_ring_id *ring_id);
 
         void (*totemsrp_service_ready_fn) (void);
+
+	void (*totemsrp_waiting_trans_ack_cb_fn) (
+		int waiting_trans_ack);
+
+	void (*memb_ring_id_create_or_load) (
+		struct memb_ring_id *memb_ring_id,
+		const struct totem_ip_address *addr);
+
+	void (*memb_ring_id_store) (
+		const struct memb_ring_id *memb_ring_id,
+		const struct totem_ip_address *addr);
 
 	int global_seqno;
 
@@ -495,14 +504,25 @@ struct totemsrp_instance {
 
 	unsigned int my_cbl;
 
-	unsigned long long int pause_timestamp;
+	uint64_t pause_timestamp;
 
 	struct memb_commit_token *commit_token;
 
 	totemsrp_stats_t stats;
+
+	uint32_t orf_token_discard;
+
+	uint32_t originated_orf_token;
+
+	uint32_t threaded_mode_enabled;
+
+	uint32_t waiting_trans_ack;
+
+	int 	flushing;
+	
 	void * token_recv_event_handle;
 	void * token_sent_event_handle;
-	char commit_token_storage[9000];
+	char commit_token_storage[40000];
 };
 
 struct message_handlers {
@@ -512,6 +532,45 @@ struct message_handlers {
 		const void *msg,
 		size_t msg_len,
 		int endian_conversion_needed);
+};
+
+enum gather_state_from {
+	TOTEMSRP_GSFROM_CONSENSUS_TIMEOUT = 0,
+	TOTEMSRP_GSFROM_GATHER_MISSING1 = 1,
+	TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_OPERATIONAL_STATE = 2,
+	TOTEMSRP_GSFROM_THE_CONSENSUS_TIMEOUT_EXPIRED = 3,
+	TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_COMMIT_STATE = 4,
+	TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_RECOVERY_STATE = 5,
+	TOTEMSRP_GSFROM_FAILED_TO_RECEIVE = 6,
+	TOTEMSRP_GSFROM_FOREIGN_MESSAGE_IN_OPERATIONAL_STATE = 7,
+	TOTEMSRP_GSFROM_FOREIGN_MESSAGE_IN_GATHER_STATE = 8,
+	TOTEMSRP_GSFROM_MERGE_DURING_OPERATIONAL_STATE = 9,
+	TOTEMSRP_GSFROM_MERGE_DURING_GATHER_STATE = 10,
+	TOTEMSRP_GSFROM_MERGE_DURING_JOIN = 11,
+	TOTEMSRP_GSFROM_JOIN_DURING_OPERATIONAL_STATE = 12,
+	TOTEMSRP_GSFROM_JOIN_DURING_COMMIT_STATE = 13,
+	TOTEMSRP_GSFROM_JOIN_DURING_RECOVERY = 14,
+	TOTEMSRP_GSFROM_INTERFACE_CHANGE = 15,
+	TOTEMSRP_GSFROM_MAX = TOTEMSRP_GSFROM_INTERFACE_CHANGE,
+};
+
+const char* gather_state_from_desc [] = {
+	[TOTEMSRP_GSFROM_CONSENSUS_TIMEOUT] = "consensus timeout",
+	[TOTEMSRP_GSFROM_GATHER_MISSING1] = "MISSING",
+	[TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_OPERATIONAL_STATE] = "The token was lost in the OPERATIONAL state.",
+	[TOTEMSRP_GSFROM_THE_CONSENSUS_TIMEOUT_EXPIRED] = "The consensus timeout expired.",
+	[TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_COMMIT_STATE] = "The token was lost in the COMMIT state.",
+	[TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_RECOVERY_STATE] = "The token was lost in the RECOVERY state.",
+	[TOTEMSRP_GSFROM_FAILED_TO_RECEIVE] = "failed to receive",
+	[TOTEMSRP_GSFROM_FOREIGN_MESSAGE_IN_OPERATIONAL_STATE] = "foreign message in operational state",
+	[TOTEMSRP_GSFROM_FOREIGN_MESSAGE_IN_GATHER_STATE] = "foreign message in gather state",
+	[TOTEMSRP_GSFROM_MERGE_DURING_OPERATIONAL_STATE] = "merge during operational state",
+	[TOTEMSRP_GSFROM_MERGE_DURING_GATHER_STATE] = "merge during gather state",
+	[TOTEMSRP_GSFROM_MERGE_DURING_JOIN] = "merge during join",
+	[TOTEMSRP_GSFROM_JOIN_DURING_OPERATIONAL_STATE] = "join during operational state",
+	[TOTEMSRP_GSFROM_JOIN_DURING_COMMIT_STATE] = "join during commit state",
+	[TOTEMSRP_GSFROM_JOIN_DURING_RECOVERY] = "join during recovery",
+	[TOTEMSRP_GSFROM_INTERFACE_CHANGE] = "interface change",
 };
 
 /*
@@ -573,16 +632,14 @@ static int srp_addr_equal (const struct srp_addr *a, const struct srp_addr *b);
 
 static void memb_leave_message_send (struct totemsrp_instance *instance);
 
-static void memb_ring_id_create_or_load (struct totemsrp_instance *, struct memb_ring_id *);
-
 static void token_callbacks_execute (struct totemsrp_instance *instance, enum totem_callback_token_type type);
-static void memb_state_gather_enter (struct totemsrp_instance *instance, int gather_from);
+static void memb_state_gather_enter (struct totemsrp_instance *instance, enum gather_state_from gather_from);
 static void messages_deliver_to_app (struct totemsrp_instance *instance, int skip, unsigned int end_point);
 static int orf_token_mcast (struct totemsrp_instance *instance, struct orf_token *oken,
 	int fcc_mcasts_allowed);
 static void messages_free (struct totemsrp_instance *instance, unsigned int token_aru);
 
-static void memb_ring_id_set_and_store (struct totemsrp_instance *instance,
+static void memb_ring_id_set (struct totemsrp_instance *instance,
 	const struct memb_ring_id *ring_id);
 static void target_set_completed (void *context);
 static void memb_state_commit_token_update (struct totemsrp_instance *instance);
@@ -605,6 +662,9 @@ static void timer_function_heartbeat_timeout (void *data);
 static void timer_function_token_retransmit_timeout (void *data);
 static void timer_function_token_hold_retransmit_timeout (void *data);
 static void timer_function_merge_detect_timeout (void *data);
+static void *totemsrp_buffer_alloc (struct totemsrp_instance *instance);
+static void totemsrp_buffer_release (struct totemsrp_instance *instance, void *ptr);
+static const char* gsfrom_to_msg(enum gather_state_from gsfrom);
 
 void main_deliver_fn (
 	void *context,
@@ -619,26 +679,41 @@ void main_iface_change_fn (
 struct message_handlers totemsrp_message_handlers = {
 	6,
 	{
-		message_handler_orf_token,
-		message_handler_mcast,
-		message_handler_memb_merge_detect,
-		message_handler_memb_join,
-		message_handler_memb_commit_token,
-		message_handler_token_hold_cancel
+		message_handler_orf_token,            /* MESSAGE_TYPE_ORF_TOKEN */
+		message_handler_mcast,                /* MESSAGE_TYPE_MCAST */
+		message_handler_memb_merge_detect,    /* MESSAGE_TYPE_MEMB_MERGE_DETECT */
+		message_handler_memb_join,            /* MESSAGE_TYPE_MEMB_JOIN */
+		message_handler_memb_commit_token,    /* MESSAGE_TYPE_MEMB_COMMIT_TOKEN */
+		message_handler_token_hold_cancel     /* MESSAGE_TYPE_TOKEN_HOLD_CANCEL */
 	}
 };
 
-static const char *rundir = NULL;
-
-#define log_printf(level, format, args...)				\
-do {									\
-	instance->totemsrp_log_printf (					\
-		LOGSYS_ENCODE_RECID(level,				\
-				   instance->totemsrp_subsys_id,	\
-				   LOGSYS_RECID_LOG),			\
-		__FUNCTION__, __FILE__, __LINE__,			\
-		format, ##args);					\
+#define log_printf(level, format, args...)		\
+do {							\
+	instance->totemsrp_log_printf (			\
+		level, instance->totemsrp_subsys_id,	\
+		__FUNCTION__, __FILE__, __LINE__,	\
+		format, ##args);			\
 } while (0);
+#define LOGSYS_PERROR(err_num, level, fmt, args...)						\
+do {												\
+	char _error_str[LOGSYS_MAX_PERROR_MSG_LEN];						\
+	const char *_error_ptr = qb_strerror_r(err_num, _error_str, sizeof(_error_str));	\
+        instance->totemsrp_log_printf (								\
+		level, instance->totemsrp_subsys_id,						\
+                __FUNCTION__, __FILE__, __LINE__,						\
+		fmt ": %s (%d)\n", ##args, _error_ptr, err_num);				\
+	} while(0)
+
+static const char* gsfrom_to_msg(enum gather_state_from gsfrom)
+{
+	if (gsfrom <= TOTEMSRP_GSFROM_MAX) {
+		return gather_state_from_desc[gsfrom];
+	}
+	else {
+		return "UNKNOWN";
+	}
+}
 
 static void totemsrp_instance_initialize (struct totemsrp_instance *instance)
 {
@@ -662,7 +737,15 @@ static void totemsrp_instance_initialize (struct totemsrp_instance *instance)
 
 	instance->my_high_delivered = SEQNO_START_MSG;
 
+	instance->orf_token_discard = 0;
+
+	instance->originated_orf_token = 0;
+
 	instance->commit_token = (struct memb_commit_token *)instance->commit_token_storage;
+
+	instance->my_id.no_addrs = INTERFACE_MAX;
+
+	instance->waiting_trans_ack = 1;
 }
 
 static void main_token_seqid_get (
@@ -692,12 +775,12 @@ static int pause_flush (struct totemsrp_instance *instance)
 	uint64_t timestamp_msec;
 	int res = 0;
 
-        now_msec = (timerlist_nano_current_get () / TIMERLIST_NS_IN_MSEC);
-        timestamp_msec = instance->pause_timestamp / TIMERLIST_NS_IN_MSEC;
+        now_msec = (qb_util_nano_current_get () / QB_TIME_NS_IN_MSEC);
+        timestamp_msec = instance->pause_timestamp / QB_TIME_NS_IN_MSEC;
 
 	if ((now_msec - timestamp_msec) > (instance->totem_config->token_timeout / 2)) {
 		log_printf (instance->totemsrp_log_level_notice,
-			"Process pause detected for %d ms, flushing membership messages.\n", (unsigned int)(now_msec - timestamp_msec));
+			"Process pause detected for %d ms, flushing membership messages.", (unsigned int)(now_msec - timestamp_msec));
 		/*
 		 * -1 indicates an error from recvmsg
 		 */
@@ -712,9 +795,9 @@ static int token_event_stats_collector (enum totem_callback_token_type type, con
 {
 	struct totemsrp_instance *instance = (struct totemsrp_instance *)void_instance;
 	uint32_t time_now;
-	unsigned long long nano_secs = timerlist_nano_current_get ();
+	unsigned long long nano_secs = qb_util_nano_current_get ();
 
-	time_now = (nano_secs / TIMERLIST_NS_IN_MSEC);
+	time_now = (nano_secs / QB_TIME_NS_IN_MSEC);
 
 	if (type == TOTEM_CALLBACK_TOKEN_RECEIVED) {
 		/* incr latest token the index */
@@ -747,7 +830,7 @@ static int token_event_stats_collector (enum totem_callback_token_type type, con
  * Exported interfaces
  */
 int totemsrp_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t *poll_handle,
 	void **srp_context,
 	struct totem_config *totem_config,
 	totemmrp_stats_t *stats,
@@ -763,32 +846,21 @@ int totemsrp_initialize (
 		const unsigned int *member_list, size_t member_list_entries,
 		const unsigned int *left_list, size_t left_list_entries,
 		const unsigned int *joined_list, size_t joined_list_entries,
-		const struct memb_ring_id *ring_id))
+		const struct memb_ring_id *ring_id),
+	void (*waiting_trans_ack_cb_fn) (
+		int waiting_trans_ack))
 {
 	struct totemsrp_instance *instance;
-	unsigned int res;
 
 	instance = malloc (sizeof (struct totemsrp_instance));
 	if (instance == NULL) {
 		goto error_exit;
 	}
 
-	rundir = getenv ("COROSYNC_RUN_DIR");
-	if (rundir == NULL) {
-		rundir = LOCALSTATEDIR "/lib/corosync";
-	}
-
-	res = mkdir (rundir, 0700);
-	if (res == -1 && errno != EEXIST) {
-		goto error_destroy;
-	}
-
-	res = chdir (rundir);
-	if (res == -1) {
-		goto error_destroy;
-	}
-
 	totemsrp_instance_initialize (instance);
+
+	instance->totemsrp_waiting_trans_ack_cb_fn = waiting_trans_ack_cb_fn;
+	instance->totemsrp_waiting_trans_ack_cb_fn (1);
 
 	stats->srp = &instance->stats;
 	instance->stats.latest_token = 0;
@@ -804,8 +876,15 @@ int totemsrp_initialize (
 	instance->totemsrp_log_level_warning = totem_config->totem_logging_configuration.log_level_warning;
 	instance->totemsrp_log_level_notice = totem_config->totem_logging_configuration.log_level_notice;
 	instance->totemsrp_log_level_debug = totem_config->totem_logging_configuration.log_level_debug;
+	instance->totemsrp_log_level_trace = totem_config->totem_logging_configuration.log_level_trace;
 	instance->totemsrp_subsys_id = totem_config->totem_logging_configuration.log_subsys_id;
 	instance->totemsrp_log_printf = totem_config->totem_logging_configuration.log_printf;
+
+	/*
+	 * Configure totem store and load functions
+	 */
+	instance->memb_ring_id_create_or_load = totem_config->totem_memb_ring_id_create_or_load;
+	instance->memb_ring_id_store = totem_config->totem_memb_ring_id_store;
 
 	/*
 	 * Initialize local variables for totemsrp
@@ -816,50 +895,60 @@ int totemsrp_initialize (
 	 * Display totem configuration
 	 */
 	log_printf (instance->totemsrp_log_level_debug,
-		"Token Timeout (%d ms) retransmit timeout (%d ms)\n",
+		"Token Timeout (%d ms) retransmit timeout (%d ms)",
 		totem_config->token_timeout, totem_config->token_retransmit_timeout);
 	log_printf (instance->totemsrp_log_level_debug,
-		"token hold (%d ms) retransmits before loss (%d retrans)\n",
+		"token hold (%d ms) retransmits before loss (%d retrans)",
 		totem_config->token_hold_timeout, totem_config->token_retransmits_before_loss_const);
 	log_printf (instance->totemsrp_log_level_debug,
-		"join (%d ms) send_join (%d ms) consensus (%d ms) merge (%d ms)\n",
+		"join (%d ms) send_join (%d ms) consensus (%d ms) merge (%d ms)",
 		totem_config->join_timeout,
 		totem_config->send_join_timeout,
 		totem_config->consensus_timeout,
 
 		totem_config->merge_timeout);
 	log_printf (instance->totemsrp_log_level_debug,
-		"downcheck (%d ms) fail to recv const (%d msgs)\n",
+		"downcheck (%d ms) fail to recv const (%d msgs)",
 		totem_config->downcheck_timeout, totem_config->fail_to_recv_const);
 	log_printf (instance->totemsrp_log_level_debug,
-		"seqno unchanged const (%d rotations) Maximum network MTU %d\n", totem_config->seqno_unchanged_const, totem_config->net_mtu);
+		"seqno unchanged const (%d rotations) Maximum network MTU %d", totem_config->seqno_unchanged_const, totem_config->net_mtu);
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"window size per rotation (%d messages) maximum messages per rotation (%d messages)\n",
+		"window size per rotation (%d messages) maximum messages per rotation (%d messages)",
 		totem_config->window_size, totem_config->max_messages);
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"send threads (%d threads)\n", totem_config->threads);
-	log_printf (instance->totemsrp_log_level_debug,
-		"RRP token expired timeout (%d ms)\n",
-		totem_config->rrp_token_expired_timeout);
-	log_printf (instance->totemsrp_log_level_debug,
-		"RRP token problem counter (%d ms)\n",
-		totem_config->rrp_problem_count_timeout);
-	log_printf (instance->totemsrp_log_level_debug,
-		"RRP threshold (%d problem count)\n",
-		totem_config->rrp_problem_count_threshold);
-	log_printf (instance->totemsrp_log_level_debug,
-		"RRP mode set to %s.\n", instance->totem_config->rrp_mode);
+		"missed count const (%d messages)",
+		totem_config->miss_count_const);
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"heartbeat_failures_allowed (%d)\n", totem_config->heartbeat_failures_allowed);
+		"send threads (%d threads)", totem_config->threads);
 	log_printf (instance->totemsrp_log_level_debug,
-		"max_network_delay (%d ms)\n", totem_config->max_network_delay);
+		"RRP token expired timeout (%d ms)",
+		totem_config->rrp_token_expired_timeout);
+	log_printf (instance->totemsrp_log_level_debug,
+		"RRP token problem counter (%d ms)",
+		totem_config->rrp_problem_count_timeout);
+	log_printf (instance->totemsrp_log_level_debug,
+		"RRP threshold (%d problem count)",
+		totem_config->rrp_problem_count_threshold);
+	log_printf (instance->totemsrp_log_level_debug,
+		"RRP multicast threshold (%d problem count)",
+		totem_config->rrp_problem_count_mcast_threshold);
+	log_printf (instance->totemsrp_log_level_debug,
+		"RRP automatic recovery check timeout (%d ms)",
+		totem_config->rrp_autorecovery_check_timeout);
+	log_printf (instance->totemsrp_log_level_debug,
+		"RRP mode set to %s.", instance->totem_config->rrp_mode);
+
+	log_printf (instance->totemsrp_log_level_debug,
+		"heartbeat_failures_allowed (%d)", totem_config->heartbeat_failures_allowed);
+	log_printf (instance->totemsrp_log_level_debug,
+		"max_network_delay (%d ms)", totem_config->max_network_delay);
 
 
 	cs_queue_init (&instance->retrans_message_queue, RETRANS_MESSAGE_QUEUE_SIZE_MAX,
-		sizeof (struct message_item));
+		sizeof (struct message_item), instance->threaded_mode_enabled);
 
 	sq_init (&instance->regular_sort_queue,
 		QUEUE_RTR_ITEMS_SIZE_MAX, sizeof (struct sort_queue_item), 0);
@@ -878,7 +967,7 @@ int totemsrp_initialize (
 
 	if ( totem_config->heartbeat_failures_allowed == 0 ) {
 		log_printf (instance->totemsrp_log_level_debug,
-			"HeartBeat is Disabled. To enable set heartbeat_failures_allowed > 0\n");
+			"HeartBeat is Disabled. To enable set heartbeat_failures_allowed > 0");
 		instance->use_heartbeat = 0;
 	}
 
@@ -889,18 +978,18 @@ int totemsrp_initialize (
 
 		if (instance->heartbeat_timeout >= totem_config->token_timeout) {
 			log_printf (instance->totemsrp_log_level_debug,
-				"total heartbeat_timeout (%d ms) is not less than token timeout (%d ms)\n",
+				"total heartbeat_timeout (%d ms) is not less than token timeout (%d ms)",
 				instance->heartbeat_timeout,
 				totem_config->token_timeout);
 			log_printf (instance->totemsrp_log_level_debug,
-				"heartbeat_timeout = heartbeat_failures_allowed * token_retransmit_timeout + max_network_delay\n");
+				"heartbeat_timeout = heartbeat_failures_allowed * token_retransmit_timeout + max_network_delay");
 			log_printf (instance->totemsrp_log_level_debug,
-				"heartbeat timeout should be less than the token timeout. HeartBeat is Diabled !!\n");
+				"heartbeat timeout should be less than the token timeout. HeartBeat is Diabled !!");
 			instance->use_heartbeat = 0;
 		}
 		else {
 			log_printf (instance->totemsrp_log_level_debug,
-				"total heartbeat_timeout (%d ms)\n", instance->heartbeat_timeout);
+				"total heartbeat_timeout (%d ms)", instance->heartbeat_timeout);
 		}
 	}
 
@@ -908,6 +997,7 @@ int totemsrp_initialize (
 		poll_handle,
 		&instance->totemrrp_context,
 		totem_config,
+		stats->srp,
 		instance,
 		main_deliver_fn,
 		main_iface_change_fn,
@@ -920,7 +1010,11 @@ int totemsrp_initialize (
 	 */
 	cs_queue_init (&instance->new_message_queue,
 		MESSAGE_QUEUE_MAX,
-		sizeof (struct message_item));
+		sizeof (struct message_item), instance->threaded_mode_enabled);
+
+	cs_queue_init (&instance->new_message_queue_trans,
+		MESSAGE_QUEUE_MAX,
+		sizeof (struct message_item), instance->threaded_mode_enabled);
 
 	totemsrp_callback_token_create (instance,
 		&instance->token_recv_event_handle,
@@ -937,9 +1031,6 @@ int totemsrp_initialize (
 	*srp_context = instance;
 	return (0);
 
-error_destroy:
-	free (instance);
-
 error_exit:
 	return (-1);
 }
@@ -949,14 +1040,30 @@ void totemsrp_finalize (
 {
 	struct totemsrp_instance *instance = (struct totemsrp_instance *)srp_context;
 
+
 	memb_leave_message_send (instance);
-	free (srp_context);
+	totemrrp_finalize (instance->totemrrp_context);
+	cs_queue_free (&instance->new_message_queue);
+	cs_queue_free (&instance->new_message_queue_trans);
+	cs_queue_free (&instance->retrans_message_queue);
+	sq_free (&instance->regular_sort_queue);
+	sq_free (&instance->recovery_sort_queue);
+	free (instance);
 }
 
+/*
+ * Return configured interfaces. interfaces is array of totem_ip addresses allocated by caller,
+ * with interaces_size number of items. iface_count is final number of interfaces filled by this
+ * function.
+ *
+ * Function returns 0 on success, otherwise if interfaces array is not big enough, -2 is returned,
+ * and if interface was not found, -1 is returned.
+ */
 int totemsrp_ifaces_get (
 	void *srp_context,
 	unsigned int nodeid,
 	struct totem_ip_address *interfaces,
+	unsigned int interfaces_size,
 	char ***status,
 	unsigned int *iface_count)
 {
@@ -973,9 +1080,15 @@ int totemsrp_ifaces_get (
 	}
 
 	if (found) {
-		memcpy (interfaces, &instance->my_memb_list[i],
-			sizeof (struct srp_addr));
 		*iface_count = instance->totem_config->interface_count;
+
+		if (interfaces_size >= *iface_count) {
+			memcpy (interfaces, instance->my_memb_list[i].addr,
+				sizeof (struct totem_ip_address) * *iface_count);
+		} else {
+			res = -2;
+		}
+
 		goto finish;
 	}
 
@@ -987,9 +1100,14 @@ int totemsrp_ifaces_get (
 	}
 
 	if (found) {
-		memcpy (interfaces, &instance->my_left_memb_list[i],
-			sizeof (struct srp_addr));
 		*iface_count = instance->totem_config->interface_count;
+
+		if (interfaces_size >= *iface_count) {
+			memcpy (interfaces, instance->my_left_memb_list[i].addr,
+				sizeof (struct totem_ip_address) * *iface_count);
+		} else {
+			res = -2;
+		}
 	} else {
 		res = -1;
 	}
@@ -1001,12 +1119,13 @@ finish:
 
 int totemsrp_crypto_set (
 	void *srp_context,
-	unsigned int type)
+	const char *cipher_type,
+	const char *hash_type)
 {
 	struct totemsrp_instance *instance = (struct totemsrp_instance *)srp_context;
 	int res;
 
-	res = totemrrp_crypto_set(instance->totemrrp_context, type);
+	res = totemrrp_crypto_set(instance->totemrrp_context, cipher_type, hash_type);
 
 	return (res);
 }
@@ -1040,7 +1159,8 @@ int totemsrp_ring_reenable (
 {
 	struct totemsrp_instance *instance = (struct totemsrp_instance *)srp_context;
 
-	totemrrp_ring_reenable (instance->totemrrp_context);
+	totemrrp_ring_reenable (instance->totemrrp_context,
+		instance->totem_config->interface_count);
 
 	return (0);
 }
@@ -1066,6 +1186,8 @@ static int srp_addr_equal (const struct srp_addr *a, const struct srp_addr *b)
 static void srp_addr_copy (struct srp_addr *dest, const struct srp_addr *src)
 {
 	unsigned int i;
+
+	dest->no_addrs = src->no_addrs;
 
 	for (i = 0; i < INTERFACE_MAX; i++) {
 		totemip_copy (&dest->addr[i], &src->addr[i]);
@@ -1189,6 +1311,16 @@ static int memb_consensus_agreed (
 			break;
 		}
 	}
+
+	if (agreed && instance->failed_to_recv == 1) {
+		/*
+		 * Both nodes agreed on our failure. We don't care how many proc list items left because we
+		 * will create single ring anyway.
+		 */
+
+		 return (agreed);
+	}
+
 	assert (token_memb_entries >= 1);
 
 	return (agreed);
@@ -1342,21 +1474,80 @@ static void memb_set_print (
 	printf ("List '%s' contains %d entries:\n", string, list_entries);
 
 	for (i = 0; i < list_entries; i++) {
-		for (j = 0; j < INTERFACE_MAX; j++) {
-			printf ("Address %d\n", i);
+		printf ("Address %d with %d rings\n", i, list[i].no_addrs);
+		for (j = 0; j < list[i].no_addrs; j++) {
 			printf ("\tiface %d %s\n", j, totemip_print (&list[i].addr[j]));
-			printf ("family %d\n", list[i].addr[j].family);
+			printf ("\tfamily %d\n", list[i].addr[j].family);
 		}
 	}
 }
 #endif
+static void my_leave_memb_clear(
+        struct totemsrp_instance *instance)
+{
+        memset(instance->my_leave_memb_list, 0, sizeof(instance->my_leave_memb_list));
+        instance->my_leave_memb_entries = 0;
+}
+
+static unsigned int my_leave_memb_match(
+        struct totemsrp_instance *instance,
+        unsigned int nodeid)
+{
+        int i;
+        unsigned int ret = 0;
+
+        for (i = 0; i < instance->my_leave_memb_entries; i++){
+                if (instance->my_leave_memb_list[i] ==  nodeid){
+                        ret = nodeid;
+                        break;
+                }
+        }
+        return ret;
+}
+
+static void my_leave_memb_set(
+        struct totemsrp_instance *instance,
+        unsigned int nodeid)
+{
+        int i, found = 0;
+        for (i = 0; i < instance->my_leave_memb_entries; i++){
+                if (instance->my_leave_memb_list[i] ==  nodeid){
+                        found = 1;
+                        break;
+                }
+        }
+        if (found == 1) {
+                return;
+        }
+        if (instance->my_leave_memb_entries < (PROCESSOR_COUNT_MAX - 1)) {
+                instance->my_leave_memb_list[instance->my_leave_memb_entries] = nodeid;
+                instance->my_leave_memb_entries++;
+        } else {
+                log_printf (instance->totemsrp_log_level_warning,
+                        "Cannot set LEAVE nodeid=%d", nodeid);
+        }
+}
+
+
+static void *totemsrp_buffer_alloc (struct totemsrp_instance *instance)
+{
+	assert (instance != NULL);
+	return totemrrp_buffer_alloc (instance->totemrrp_context);
+}
+
+static void totemsrp_buffer_release (struct totemsrp_instance *instance, void *ptr)
+{
+	assert (instance != NULL);
+	totemrrp_buffer_release (instance->totemrrp_context, ptr);
+}
 
 static void reset_token_retransmit_timeout (struct totemsrp_instance *instance)
 {
-	poll_timer_delete (instance->totemsrp_poll_handle,
+	qb_loop_timer_del (instance->totemsrp_poll_handle,
 		instance->timer_orf_token_retransmit_timeout);
-	poll_timer_add (instance->totemsrp_poll_handle,
-		instance->totem_config->token_retransmit_timeout,
+	qb_loop_timer_add (instance->totemsrp_poll_handle,
+		QB_LOOP_MED,
+		instance->totem_config->token_retransmit_timeout*QB_TIME_NS_IN_MSEC,
 		(void *)instance,
 		timer_function_token_retransmit_timeout,
 		&instance->timer_orf_token_retransmit_timeout);
@@ -1366,8 +1557,9 @@ static void reset_token_retransmit_timeout (struct totemsrp_instance *instance)
 static void start_merge_detect_timeout (struct totemsrp_instance *instance)
 {
 	if (instance->my_merge_detect_timeout_outstanding == 0) {
-		poll_timer_add (instance->totemsrp_poll_handle,
-			instance->totem_config->merge_timeout,
+		qb_loop_timer_add (instance->totemsrp_poll_handle,
+			QB_LOOP_MED,
+			instance->totem_config->merge_timeout*QB_TIME_NS_IN_MSEC,
 			(void *)instance,
 			timer_function_merge_detect_timeout,
 			&instance->timer_merge_detect_timeout);
@@ -1378,7 +1570,7 @@ static void start_merge_detect_timeout (struct totemsrp_instance *instance)
 
 static void cancel_merge_detect_timeout (struct totemsrp_instance *instance)
 {
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->timer_merge_detect_timeout);
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->timer_merge_detect_timeout);
 	instance->my_merge_detect_timeout_outstanding = 0;
 }
 
@@ -1390,54 +1582,58 @@ static void old_ring_state_save (struct totemsrp_instance *instance)
 {
 	if (instance->old_ring_state_saved == 0) {
 		instance->old_ring_state_saved = 1;
+		memcpy (&instance->my_old_ring_id, &instance->my_ring_id,
+			sizeof (struct memb_ring_id));
 		instance->old_ring_state_aru = instance->my_aru;
 		instance->old_ring_state_high_seq_received = instance->my_high_seq_received;
 		log_printf (instance->totemsrp_log_level_debug,
-			"Saving state aru %x high seq received %x\n",
+			"Saving state aru %x high seq received %x",
 			instance->my_aru, instance->my_high_seq_received);
 	}
 }
 
-static void ring_state_restore (struct totemsrp_instance *instance)
+static void old_ring_state_restore (struct totemsrp_instance *instance)
 {
-	if (instance->old_ring_state_saved) {
-		totemip_zero_set(&instance->my_ring_id.rep);
-		instance->my_aru = instance->old_ring_state_aru;
-		instance->my_high_seq_received = instance->old_ring_state_high_seq_received;
-		log_printf (instance->totemsrp_log_level_debug,
-			"Restoring instance->my_aru %x my high seq received %x\n",
-			instance->my_aru, instance->my_high_seq_received);
-	}
+	instance->my_aru = instance->old_ring_state_aru;
+	instance->my_high_seq_received = instance->old_ring_state_high_seq_received;
+	log_printf (instance->totemsrp_log_level_debug,
+		"Restoring instance->my_aru %x my high seq received %x",
+		instance->my_aru, instance->my_high_seq_received);
 }
 
 static void old_ring_state_reset (struct totemsrp_instance *instance)
 {
+	log_printf (instance->totemsrp_log_level_debug,
+		"Resetting old ring state");
 	instance->old_ring_state_saved = 0;
 }
 
 static void reset_pause_timeout (struct totemsrp_instance *instance)
 {
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->timer_pause_timeout);
-	poll_timer_add (instance->totemsrp_poll_handle,
-		instance->totem_config->token_timeout / 5,
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->timer_pause_timeout);
+	qb_loop_timer_add (instance->totemsrp_poll_handle,
+		QB_LOOP_MED,
+		instance->totem_config->token_timeout * QB_TIME_NS_IN_MSEC / 5,
 		(void *)instance,
 		timer_function_pause_timeout,
 		&instance->timer_pause_timeout);
 }
 
 static void reset_token_timeout (struct totemsrp_instance *instance) {
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->timer_orf_token_timeout);
-	poll_timer_add (instance->totemsrp_poll_handle,
-		instance->totem_config->token_timeout,
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->timer_orf_token_timeout);
+	qb_loop_timer_add (instance->totemsrp_poll_handle,
+		QB_LOOP_MED,
+		instance->totem_config->token_timeout*QB_TIME_NS_IN_MSEC,
 		(void *)instance,
 		timer_function_orf_token_timeout,
 		&instance->timer_orf_token_timeout);
 }
 
 static void reset_heartbeat_timeout (struct totemsrp_instance *instance) {
-        poll_timer_delete (instance->totemsrp_poll_handle, instance->timer_heartbeat_timeout);
-        poll_timer_add (instance->totemsrp_poll_handle,
-                instance->heartbeat_timeout,
+        qb_loop_timer_del (instance->totemsrp_poll_handle, instance->timer_heartbeat_timeout);
+        qb_loop_timer_add (instance->totemsrp_poll_handle,
+		QB_LOOP_MED,
+                instance->heartbeat_timeout*QB_TIME_NS_IN_MSEC,
                 (void *)instance,
                 timer_function_heartbeat_timeout,
                 &instance->timer_heartbeat_timeout);
@@ -1445,22 +1641,23 @@ static void reset_heartbeat_timeout (struct totemsrp_instance *instance) {
 
 
 static void cancel_token_timeout (struct totemsrp_instance *instance) {
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->timer_orf_token_timeout);
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->timer_orf_token_timeout);
 }
 
 static void cancel_heartbeat_timeout (struct totemsrp_instance *instance) {
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->timer_heartbeat_timeout);
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->timer_heartbeat_timeout);
 }
 
 static void cancel_token_retransmit_timeout (struct totemsrp_instance *instance)
 {
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->timer_orf_token_retransmit_timeout);
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->timer_orf_token_retransmit_timeout);
 }
 
 static void start_token_hold_retransmit_timeout (struct totemsrp_instance *instance)
 {
-	poll_timer_add (instance->totemsrp_poll_handle,
-		instance->totem_config->token_hold_timeout,
+	qb_loop_timer_add (instance->totemsrp_poll_handle,
+		QB_LOOP_MED,
+		instance->totem_config->token_hold_timeout*QB_TIME_NS_IN_MSEC,
 		(void *)instance,
 		timer_function_token_hold_retransmit_timeout,
 		&instance->timer_orf_token_hold_retransmit_timeout);
@@ -1468,7 +1665,7 @@ static void start_token_hold_retransmit_timeout (struct totemsrp_instance *insta
 
 static void cancel_token_hold_retransmit_timeout (struct totemsrp_instance *instance)
 {
-	poll_timer_delete (instance->totemsrp_poll_handle,
+	qb_loop_timer_del (instance->totemsrp_poll_handle,
 		instance->timer_orf_token_hold_retransmit_timeout);
 }
 
@@ -1495,7 +1692,7 @@ static void memb_state_consensus_timeout_expired (
 
 		memb_set_merge (no_consensus_list, no_consensus_list_entries,
 			instance->my_failed_list, &instance->my_failed_list_entries);
-		memb_state_gather_enter (instance, 0);
+		memb_state_gather_enter (instance, TOTEMSRP_GSFROM_CONSENSUS_TIMEOUT);
 	}
 }
 
@@ -1510,8 +1707,15 @@ static void timer_function_pause_timeout (void *data)
 {
 	struct totemsrp_instance *instance = data;
 
-	instance->pause_timestamp = timerlist_nano_current_get ();
+	instance->pause_timestamp = qb_util_nano_current_get ();
 	reset_pause_timeout (instance);
+}
+
+static void memb_recovery_state_token_loss (struct totemsrp_instance *instance)
+{
+	old_ring_state_restore (instance);
+	memb_state_gather_enter (instance, TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_RECOVERY_STATE);
+	instance->stats.recovery_token_lost++;
 }
 
 static void timer_function_orf_token_timeout (void *data)
@@ -1521,35 +1725,34 @@ static void timer_function_orf_token_timeout (void *data)
 	switch (instance->memb_state) {
 		case MEMB_STATE_OPERATIONAL:
 			log_printf (instance->totemsrp_log_level_debug,
-				"The token was lost in the OPERATIONAL state.\n");
+				"The token was lost in the OPERATIONAL state.");
 			log_printf (instance->totemsrp_log_level_notice,
-				"A processor failed, forming new configuration.\n");
+				"A processor failed, forming new configuration.");
 			totemrrp_iface_check (instance->totemrrp_context);
-			memb_state_gather_enter (instance, 2);
+			memb_state_gather_enter (instance, TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_OPERATIONAL_STATE);
 			instance->stats.operational_token_lost++;
 			break;
 
 		case MEMB_STATE_GATHER:
 			log_printf (instance->totemsrp_log_level_debug,
-				"The consensus timeout expired.\n");
+				"The consensus timeout expired.");
 			memb_state_consensus_timeout_expired (instance);
-			memb_state_gather_enter (instance, 3);
+			memb_state_gather_enter (instance, TOTEMSRP_GSFROM_THE_CONSENSUS_TIMEOUT_EXPIRED);
 			instance->stats.gather_token_lost++;
 			break;
 
 		case MEMB_STATE_COMMIT:
 			log_printf (instance->totemsrp_log_level_debug,
-				"The token was lost in the COMMIT state.\n");
-			memb_state_gather_enter (instance, 4);
+				"The token was lost in the COMMIT state.");
+			memb_state_gather_enter (instance, TOTEMSRP_GSFROM_THE_TOKEN_WAS_LOST_IN_THE_COMMIT_STATE);
 			instance->stats.commit_token_lost++;
 			break;
 
 		case MEMB_STATE_RECOVERY:
 			log_printf (instance->totemsrp_log_level_debug,
-				"The token was lost in the RECOVERY state.\n");
-			ring_state_restore (instance);
-			memb_state_gather_enter (instance, 5);
-			instance->stats.recovery_token_lost++;
+				"The token was lost in the RECOVERY state.");
+			memb_recovery_state_token_loss (instance);
+			instance->orf_token_discard = 1;
 			break;
 	}
 }
@@ -1558,7 +1761,7 @@ static void timer_function_heartbeat_timeout (void *data)
 {
 	struct totemsrp_instance *instance = data;
 	log_printf (instance->totemsrp_log_level_debug,
-		"HeartBeat Timer expired Invoking token loss mechanism in state %d \n", instance->memb_state);
+		"HeartBeat Timer expired Invoking token loss mechanism in state %d ", instance->memb_state);
 	timer_function_orf_token_timeout(data);
 }
 
@@ -1578,10 +1781,11 @@ static void memb_timer_function_state_gather (void *data)
 		/*
 		 * Restart the join timeout
 		`*/
-		poll_timer_delete (instance->totemsrp_poll_handle, instance->memb_timer_state_gather_join_timeout);
+		qb_loop_timer_del (instance->totemsrp_poll_handle, instance->memb_timer_state_gather_join_timeout);
 
-		poll_timer_add (instance->totemsrp_poll_handle,
-			instance->totem_config->join_timeout,
+		qb_loop_timer_add (instance->totemsrp_poll_handle,
+			QB_LOOP_MED,
+			instance->totem_config->join_timeout*QB_TIME_NS_IN_MSEC,
 			(void *)instance,
 			memb_timer_function_state_gather,
 			&instance->memb_timer_state_gather_join_timeout);
@@ -1606,7 +1810,7 @@ static void deliver_messages_from_recovery_to_regular (struct totemsrp_instance 
 	struct mcast *mcast;
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"recovery to regular %x-%x\n", SEQNO_START_MSG + 1, instance->my_aru);
+		"recovery to regular %x-%x", SEQNO_START_MSG + 1, instance->my_aru);
 
 	range = instance->my_aru - SEQNO_START_MSG;
 	/*
@@ -1643,7 +1847,7 @@ static void deliver_messages_from_recovery_to_regular (struct totemsrp_instance 
 		}
 
 		log_printf (instance->totemsrp_log_level_debug,
-			"comparing if ring id is for this processors old ring seqno %d\n",
+			"comparing if ring id is for this processors old ring seqno %d",
 			 mcast->seq);
 
 		/*
@@ -1664,7 +1868,7 @@ static void deliver_messages_from_recovery_to_regular (struct totemsrp_instance 
 			}
 		} else {
 			log_printf (instance->totemsrp_log_level_debug,
-				"-not adding msg with seq no %x\n", mcast->seq);
+				"-not adding msg with seq no %x", mcast->seq);
 		}
 	}
 }
@@ -1681,6 +1885,13 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 	unsigned int trans_memb_list_totemip[PROCESSOR_COUNT_MAX];
 	unsigned int new_memb_list_totemip[PROCESSOR_COUNT_MAX];
 	unsigned int left_list[PROCESSOR_COUNT_MAX];
+	unsigned int i;
+	unsigned int res;
+	char left_node_msg[1024];
+	char joined_node_msg[1024];
+	char failed_node_msg[1024];
+
+	instance->originated_orf_token = 0;
 
 	memb_consensus_reset (instance);
 
@@ -1688,8 +1899,8 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 
 	deliver_messages_from_recovery_to_regular (instance);
 
-	log_printf (instance->totemsrp_log_level_debug,
-		"Delivering to app %x to %x\n",
+	log_printf (instance->totemsrp_log_level_trace,
+		"Delivering to app %x to %x",
 		instance->my_high_delivered + 1, instance->old_ring_state_high_seq_received);
 
 	aru_save = instance->my_aru;
@@ -1719,6 +1930,16 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 	instance->my_set_retrans_flg = 0;
 
 	/*
+	 * Inform RRP about transitional change
+	 */
+	totemrrp_membership_changed (
+		instance->totemrrp_context,
+		TOTEM_CONFIGURATION_TRANSITIONAL,
+		instance->my_trans_memb_list, instance->my_trans_memb_entries,
+		instance->my_left_memb_list, instance->my_left_memb_entries,
+		NULL, 0,
+		&instance->my_ring_id);
+	/*
 	 * Deliver transitional configuration to application
 	 */
 	srp_addr_to_nodeid (left_list, instance->my_left_memb_list,
@@ -1729,6 +1950,8 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 		trans_memb_list_totemip, instance->my_trans_memb_entries,
 		left_list, instance->my_left_memb_entries,
 		0, 0, &instance->my_ring_id);
+	instance->waiting_trans_ack = 1;
+	instance->totemsrp_waiting_trans_ack_cb_fn (1);
 
 // TODO we need to filter to ensure we only deliver those
 // messages which are part of instance->my_deliver_memb
@@ -1736,6 +1959,16 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 
 	instance->my_aru = aru_save;
 
+	/*
+	 * Inform RRP about regular membership change
+	 */
+	totemrrp_membership_changed (
+		instance->totemrrp_context,
+		TOTEM_CONFIGURATION_REGULAR,
+		instance->my_new_memb_list, instance->my_new_memb_entries,
+		NULL, 0,
+		joined_list, joined_list_entries,
+		&instance->my_ring_id);
 	/*
 	 * Deliver regular configuration to application
 	 */
@@ -1755,7 +1988,6 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 	 */
 	sq_copy (&instance->regular_sort_queue, &instance->recovery_sort_queue);
 	instance->my_last_aru = SEQNO_START_MSG;
-	sq_items_release (&instance->regular_sort_queue, SEQNO_START_MSG - 1);
 
 	/* When making my_proc_list smaller, ensure that the
 	 * now non-used entries are zero-ed out. There are some suspect
@@ -1771,16 +2003,108 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 		sizeof (struct srp_addr) * instance->my_memb_entries);
 
 	instance->my_failed_list_entries = 0;
-	instance->my_high_delivered = instance->my_aru;
-// TODO the recovery messages are leaked
+	/*
+	 * TODO Not exactly to spec
+	 *
+	 * At the entry to this function all messages without a gap are
+	 * deliered.
+	 *
+	 * This code throw away messages from the last gap in the sort queue
+	 * to my_high_seq_received
+	 *
+	 * What should really happen is we should deliver all messages up to
+	 * a gap, then delier the transitional configuration, then deliver
+	 * the messages between the first gap and my_high_seq_received, then
+	 * deliver a regular configuration, then deliver the regular
+	 * configuration
+	 *
+	 * Unfortunately totempg doesn't appear to like this operating mode
+	 * which needs more inspection
+	 */
+	i = instance->my_high_seq_received + 1;
+	do {
+		void *ptr;
+
+		i -= 1;
+		res = sq_item_get (&instance->regular_sort_queue, i, &ptr);
+		if (i == 0) {
+			break;
+		}
+	} while (res);
+
+	instance->my_high_delivered = i;
+
+	for (i = 0; i <= instance->my_high_delivered; i++) {
+		void *ptr;
+
+		res = sq_item_get (&instance->regular_sort_queue, i, &ptr);
+		if (res == 0) {
+			struct sort_queue_item *regular_message;
+
+			regular_message = ptr;
+			free (regular_message->mcast);
+		}
+	}
+	sq_items_release (&instance->regular_sort_queue, instance->my_high_delivered);
+	instance->last_released = instance->my_high_delivered;
+
+	if (joined_list_entries) {
+		int sptr = 0;
+		sptr += snprintf(joined_node_msg, sizeof(joined_node_msg)-sptr, " joined:");
+		for (i=0; i< joined_list_entries; i++) {
+			sptr += snprintf(joined_node_msg+sptr, sizeof(joined_node_msg)-sptr, " %u", joined_list_totemip[i]);
+		}
+	}
+	else {
+		joined_node_msg[0] = '\0';
+	}
+
+	if (instance->my_left_memb_entries) {
+		int sptr = 0;
+		int sptr2 = 0;
+		sptr += snprintf(left_node_msg, sizeof(left_node_msg)-sptr, " left:");
+		for (i=0; i< instance->my_left_memb_entries; i++) {
+			sptr += snprintf(left_node_msg+sptr, sizeof(left_node_msg)-sptr, " %u", left_list[i]);
+		}
+		for (i=0; i< instance->my_left_memb_entries; i++) {
+			if (my_leave_memb_match(instance, left_list[i]) == 0) {
+				if (sptr2 == 0) {
+					sptr2 += snprintf(failed_node_msg, sizeof(failed_node_msg)-sptr2, " failed:");
+				}
+				sptr2 += snprintf(failed_node_msg+sptr2, sizeof(left_node_msg)-sptr2, " %u", left_list[i]);
+			}		
+		}
+		if (sptr2 == 0) {
+			failed_node_msg[0] = '\0';
+		}
+	}
+	else {
+		left_node_msg[0] = '\0';
+		failed_node_msg[0] = '\0';
+	}
+
+	my_leave_memb_clear(instance);
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"entering OPERATIONAL state.\n");
+		"entering OPERATIONAL state.");
 	log_printf (instance->totemsrp_log_level_notice,
-		"A processor joined or left the membership and a new membership was formed.\n");
+		"A new membership (%s:%lld) was formed. Members%s%s",
+		totemip_print (&instance->my_ring_id.rep),
+		instance->my_ring_id.seq,
+		joined_node_msg,
+		left_node_msg);
+
+	if (strlen(failed_node_msg)) {
+		log_printf (instance->totemsrp_log_level_notice,
+			"Failed to receive the leave message.%s",
+			failed_node_msg);
+	}
+
 	instance->memb_state = MEMB_STATE_OPERATIONAL;
 
 	instance->stats.operational_entered++;
+	instance->stats.continuous_gather = 0;
+
 	instance->my_received_flg = 1;
 
 	reset_pause_timeout (instance);
@@ -1798,8 +2122,12 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 
 static void memb_state_gather_enter (
 	struct totemsrp_instance *instance,
-	int gather_from)
+	enum gather_state_from gather_from)
 {
+	instance->orf_token_discard = 1;
+
+	instance->originated_orf_token = 0;
+
 	memb_set_merge (
 		&instance->my_id, 1,
 		instance->my_proc_list, &instance->my_proc_list_entries);
@@ -1809,10 +2137,11 @@ static void memb_state_gather_enter (
 	/*
 	 * Restart the join timeout
 	 */
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->memb_timer_state_gather_join_timeout);
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->memb_timer_state_gather_join_timeout);
 
-	poll_timer_add (instance->totemsrp_poll_handle,
-		instance->totem_config->join_timeout,
+	qb_loop_timer_add (instance->totemsrp_poll_handle,
+		QB_LOOP_MED,
+		instance->totem_config->join_timeout*QB_TIME_NS_IN_MSEC,
 		(void *)instance,
 		memb_timer_function_state_gather,
 		&instance->memb_timer_state_gather_join_timeout);
@@ -1820,11 +2149,12 @@ static void memb_state_gather_enter (
 	/*
 	 * Restart the consensus timeout
 	 */
-	poll_timer_delete (instance->totemsrp_poll_handle,
+	qb_loop_timer_del (instance->totemsrp_poll_handle,
 		instance->memb_timer_state_gather_consensus_timeout);
 
-	poll_timer_add (instance->totemsrp_poll_handle,
-		instance->totem_config->consensus_timeout,
+	qb_loop_timer_add (instance->totemsrp_poll_handle,
+		QB_LOOP_MED,
+		instance->totem_config->consensus_timeout*QB_TIME_NS_IN_MSEC,
 		(void *)instance,
 		memb_timer_function_gather_consensus_timeout,
 		&instance->memb_timer_state_gather_consensus_timeout);
@@ -1841,10 +2171,18 @@ static void memb_state_gather_enter (
 	memb_consensus_set (instance, &instance->my_id);
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"entering GATHER state from %d.\n", gather_from);
+		    "entering GATHER state from %d(%s).",
+		    gather_from, gsfrom_to_msg(gather_from));
 
 	instance->memb_state = MEMB_STATE_GATHER;
 	instance->stats.gather_entered++;
+
+	if (gather_from == TOTEMSRP_GSFROM_THE_CONSENSUS_TIMEOUT_EXPIRED) {
+		/*
+		 * State 3 means gather, so we are continuously gathering.
+		 */
+		instance->stats.continuous_gather++;
+	}
 
 	return;
 }
@@ -1869,26 +2207,28 @@ static void memb_state_commit_enter (
 
 	memb_state_commit_token_target_set (instance);
 
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->memb_timer_state_gather_join_timeout);
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->memb_timer_state_gather_join_timeout);
 
 	instance->memb_timer_state_gather_join_timeout = 0;
 
-	poll_timer_delete (instance->totemsrp_poll_handle, instance->memb_timer_state_gather_consensus_timeout);
+	qb_loop_timer_del (instance->totemsrp_poll_handle, instance->memb_timer_state_gather_consensus_timeout);
 
 	instance->memb_timer_state_gather_consensus_timeout = 0;
 
-	memb_ring_id_set_and_store (instance, &instance->commit_token->ring_id);
+	memb_ring_id_set (instance, &instance->commit_token->ring_id);
+	instance->memb_ring_id_store (&instance->my_ring_id, &instance->my_id.addr[0]);
 
 	instance->token_ring_id_seq = instance->my_ring_id.seq;
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"entering COMMIT state.\n");
+		"entering COMMIT state.");
 
 	instance->memb_state = MEMB_STATE_COMMIT;
 	reset_token_retransmit_timeout (instance); // REVIEWED
 	reset_token_timeout (instance); // REVIEWED
 
 	instance->stats.commit_entered++;
+	instance->stats.continuous_gather = 0;
 
 	/*
 	 * reset all flow control variables since we are starting a new ring
@@ -1918,7 +2258,9 @@ static void memb_state_recovery_enter (
 	memb_list = (struct memb_commit_token_memb_entry *)(addr + commit_token->addr_entries);
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"entering RECOVERY state.\n");
+		"entering RECOVERY state.");
+
+	instance->orf_token_discard = 0;
 
 	instance->my_high_ring_delivered = 0;
 
@@ -1958,18 +2300,18 @@ static void memb_state_recovery_enter (
 
 	for (i = 0; i < instance->my_trans_memb_entries; i++) {
 		log_printf (instance->totemsrp_log_level_debug,
-			"TRANS [%d] member %s:\n", i, totemip_print (&instance->my_trans_memb_list[i].addr[0]));
+			"TRANS [%d] member %s:", i, totemip_print (&instance->my_trans_memb_list[i].addr[0]));
 	}
 	for (i = 0; i < instance->my_new_memb_entries; i++) {
 		log_printf (instance->totemsrp_log_level_debug,
-			"position [%d] member %s:\n", i, totemip_print (&addr[i].addr[0]));
+			"position [%d] member %s:", i, totemip_print (&addr[i].addr[0]));
 		log_printf (instance->totemsrp_log_level_debug,
-			"previous ring seq %lld rep %s\n",
+			"previous ring seq %llx rep %s",
 			memb_list[i].ring_id.seq,
 			totemip_print (&memb_list[i].ring_id.rep));
 
 		log_printf (instance->totemsrp_log_level_debug,
-			"aru %x high delivered %x received flag %d\n",
+			"aru %x high delivered %x received flag %d",
 			memb_list[i].aru,
 			memb_list[i].high_delivered,
 			memb_list[i].received_flg);
@@ -2030,7 +2372,7 @@ static void memb_state_recovery_enter (
 	assert (range < QUEUE_RTR_ITEMS_SIZE_MAX);
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"copying all old ring messages from %x-%x.\n",
+		"copying all old ring messages from %x-%x.",
 		low_ring_aru + 1, instance->old_ring_state_high_seq_received);
 
 	for (i = 1; i <= range; i++) {
@@ -2048,7 +2390,7 @@ static void memb_state_recovery_enter (
 		messages_originated++;
 		memset (&message_item, 0, sizeof (struct message_item));
 	// TODO	 LEAK
-		message_item.mcast = malloc (FRAME_SIZE_MAX);
+		message_item.mcast = totemsrp_buffer_alloc (instance);
 		assert (message_item.mcast);
 		message_item.mcast->header.type = MESSAGE_TYPE_MCAST;
 		srp_addr_copy (&message_item.mcast->system_from, &instance->my_id);
@@ -2065,12 +2407,12 @@ static void memb_state_recovery_enter (
 		cs_queue_item_add (&instance->retrans_message_queue, &message_item);
 	}
 	log_printf (instance->totemsrp_log_level_debug,
-		"Originated %d messages in RECOVERY.\n", messages_originated);
+		"Originated %d messages in RECOVERY.", messages_originated);
 	goto originated;
 
 no_originate:
 	log_printf (instance->totemsrp_log_level_debug,
-		"Did not need to originate any messages in recovery.\n");
+		"Did not need to originate any messages in recovery.");
 
 originated:
 	instance->my_aru = SEQNO_START_MSG;
@@ -2085,6 +2427,8 @@ originated:
 
 	instance->memb_state = MEMB_STATE_RECOVERY;
 	instance->stats.recovery_entered++;
+	instance->stats.continuous_gather = 0;
+
 	return;
 }
 
@@ -2108,9 +2452,16 @@ int totemsrp_mcast (
 	struct message_item message_item;
 	char *addr;
 	unsigned int addr_idx;
+	struct cs_queue *queue_use;
 
-	if (cs_queue_is_full (&instance->new_message_queue)) {
-		log_printf (instance->totemsrp_log_level_debug, "queue full\n");
+	if (instance->waiting_trans_ack) {
+		queue_use = &instance->new_message_queue_trans;
+	} else {
+		queue_use = &instance->new_message_queue;
+	}
+
+	if (cs_queue_is_full (queue_use)) {
+		log_printf (instance->totemsrp_log_level_debug, "queue full");
 		return (-1);
 	}
 
@@ -2119,7 +2470,7 @@ int totemsrp_mcast (
 	/*
 	 * Allocate pending item
 	 */
-	message_item.mcast = malloc (FRAME_SIZE_MAX);
+	message_item.mcast = totemsrp_buffer_alloc (instance);
 	if (message_item.mcast == 0) {
 		goto error_mcast;
 	}
@@ -2127,6 +2478,7 @@ int totemsrp_mcast (
 	/*
 	 * Set mcast header
 	 */
+	memset(message_item.mcast, 0, sizeof (struct mcast));
 	message_item.mcast->header.type = MESSAGE_TYPE_MCAST;
 	message_item.mcast->header.endian_detector = ENDIAN_LOCAL;
 	message_item.mcast->header.encapsulated = MESSAGE_NOT_ENCAPSULATED;
@@ -2145,9 +2497,9 @@ int totemsrp_mcast (
 
 	message_item.msg_len = addr_idx;
 
-	log_printf (instance->totemsrp_log_level_debug, "mcasted message added to pending queue\n");
+	log_printf (instance->totemsrp_log_level_trace, "mcasted message added to pending queue");
 	instance->stats.mcast_tx++;
-	cs_queue_item_add (&instance->new_message_queue, &message_item);
+	cs_queue_item_add (queue_use, &message_item);
 
 	return (0);
 
@@ -2162,8 +2514,14 @@ int totemsrp_avail (void *srp_context)
 {
 	struct totemsrp_instance *instance = (struct totemsrp_instance *)srp_context;
 	int avail;
+	struct cs_queue *queue_use;
 
-	cs_queue_avail (&instance->new_message_queue, &avail);
+	if (instance->waiting_trans_ack) {
+		queue_use = &instance->new_message_queue_trans;
+	} else {
+		queue_use = &instance->new_message_queue;
+	}
+	cs_queue_avail (queue_use, &avail);
 
 	return (avail);
 }
@@ -2192,7 +2550,7 @@ static int orf_token_remcast (
 
 	res = sq_in_range (sort_queue, seq);
 	if (res == 0) {
-		log_printf (instance->totemsrp_log_level_debug, "sq not in range\n");
+		log_printf (instance->totemsrp_log_level_debug, "sq not in range");
 		return (-1);
 	}
 
@@ -2257,7 +2615,7 @@ static void messages_free (
 			instance->last_released + i, &ptr);
 		if (res == 0) {
 			regular_message = ptr;
-			free (regular_message->mcast);
+			totemsrp_buffer_release (instance, regular_message->mcast);
 		}
 		sq_items_release (&instance->regular_sort_queue,
 			instance->last_released + i);
@@ -2267,8 +2625,8 @@ static void messages_free (
 	instance->last_released += range;
 
  	if (log_release) {
-		log_printf (instance->totemsrp_log_level_debug,
-			"releasing messages up to and including %x\n", release_to);
+		log_printf (instance->totemsrp_log_level_trace,
+			"releasing messages up to and including %x", release_to);
 	}
 }
 
@@ -2288,9 +2646,6 @@ static void update_aru (
 	}
 
 	range = instance->my_high_seq_received - instance->my_aru;
-	if (range > 1024) {
-		return;
-	}
 
 	my_aru_saved = instance->my_aru;
 	for (i = 1; i <= range; i++) {
@@ -2320,7 +2675,6 @@ static int orf_token_mcast (
 	struct cs_queue *mcast_queue;
 	struct sq *sort_queue;
 	struct sort_queue_item sort_queue_item;
-	struct sort_queue_item *sort_queue_item_ptr;
 	struct mcast *mcast;
 	unsigned int fcc_mcast_current;
 
@@ -2329,7 +2683,12 @@ static int orf_token_mcast (
 		sort_queue = &instance->recovery_sort_queue;
 		reset_token_retransmit_timeout (instance); // REVIEWED
 	} else {
-		mcast_queue = &instance->new_message_queue;
+		if (instance->waiting_trans_ack) {
+			mcast_queue = &instance->new_message_queue_trans;
+		} else {
+			mcast_queue = &instance->new_message_queue;
+		}
+
 		sort_queue = &instance->regular_sort_queue;
 	}
 
@@ -2338,16 +2697,6 @@ static int orf_token_mcast (
 			break;
 		}
 		message_item = (struct message_item *)cs_queue_item_get (mcast_queue);
-		/* preincrement required by algo */
-		if (instance->old_ring_state_saved &&
-			(instance->memb_state == MEMB_STATE_GATHER ||
-			instance->memb_state == MEMB_STATE_COMMIT)) {
-
-			log_printf (instance->totemsrp_log_level_debug,
-				"not multicasting at seqno is %d\n",
-			token->seq);
-			return (0);
-		}
 
 		message_item->mcast->seq = ++token->seq;
 		message_item->mcast->this_seqno = instance->global_seqno++;
@@ -2366,8 +2715,7 @@ static int orf_token_mcast (
 		/*
 		 * Add message to retransmit queue
 		 */
-		sort_queue_item_ptr = sq_item_add (sort_queue,
-			&sort_queue_item, message_item->mcast->seq);
+		sq_item_add (sort_queue, &sort_queue_item, message_item->mcast->seq);
 
 		totemrrp_mcast_noflush_send (
 			instance->totemrrp_context,
@@ -2405,7 +2753,6 @@ static int orf_token_rtr (
 	unsigned int res;
 	unsigned int i, j;
 	unsigned int found;
-	unsigned int total_entries;
 	struct sq *sort_queue;
 	struct rtr_item *rtr_list;
 	unsigned int range = 0;
@@ -2423,17 +2770,15 @@ static int orf_token_rtr (
 	strcpy (retransmit_msg, "Retransmit List: ");
 	if (orf_token->rtr_list_entries) {
 		log_printf (instance->totemsrp_log_level_debug,
-			"Retransmit List %d\n", orf_token->rtr_list_entries);
+			"Retransmit List %d", orf_token->rtr_list_entries);
 		for (i = 0; i < orf_token->rtr_list_entries; i++) {
 			sprintf (value, "%x ", rtr_list[i].seq);
 			strcat (retransmit_msg, value);
 		}
-		strcat (retransmit_msg, "\n");
-		log_printf (instance->totemsrp_log_level_debug,
+		strcat (retransmit_msg, "");
+		log_printf (instance->totemsrp_log_level_notice,
 			"%s", retransmit_msg);
 	}
-
-	total_entries = orf_token->rtr_list_entries;
 
 	/*
 	 * Retransmit messages on orf_token's RTR list from RTR queue
@@ -2460,7 +2805,7 @@ static int orf_token_rtr (
 			orf_token->rtr_list_entries -= 1;
 			assert (orf_token->rtr_list_entries >= 0);
 			memmove (&rtr_list[i], &rtr_list[i + 1],
-				sizeof (struct rtr_item) * (orf_token->rtr_list_entries));
+				sizeof (struct rtr_item) * (orf_token->rtr_list_entries - i));
 
 			instance->stats.mcast_retx++;
 			instance->fcc_remcast_current++;
@@ -2494,6 +2839,20 @@ static int orf_token_rtr (
 		 */
 		res = sq_item_inuse (sort_queue, instance->my_aru + i);
 		if (res == 0) {
+			/*
+			 * Determine how many times we have missed receiving
+			 * this sequence number.  sq_item_miss_count increments
+			 * a counter for the sequence number.  The miss count
+			 * will be returned and compared.  This allows time for
+			 * delayed multicast messages to be received before
+			 * declaring the message is missing and requesting a
+			 * retransmit.
+			 */
+			res = sq_item_miss_count (sort_queue, instance->my_aru + i);
+			if (res < instance->totem_config->miss_count_const) {
+				continue;
+			}
+
 			/*
 			 * Determine if missing message is already in retransmit list
 			 */
@@ -2594,9 +2953,9 @@ static int token_send (
 	orf_token_size = sizeof (struct orf_token) +
 		(orf_token->rtr_list_entries * sizeof (struct rtr_item));
 
+	orf_token->header.nodeid = instance->my_id.addr[0].nodeid;
 	memcpy (instance->orf_token_retransmit, orf_token, orf_token_size);
 	instance->orf_token_retransmit_size = orf_token_size;
-	orf_token->header.nodeid = instance->my_id.addr[0].nodeid;
 	assert (orf_token->header.nodeid);
 
 	if (forward_token == 0) {
@@ -2768,14 +3127,10 @@ static int memb_state_commit_token_send_recovery (
 	struct totemsrp_instance *instance,
 	struct memb_commit_token *commit_token)
 {
-	struct srp_addr *addr;
-	struct memb_commit_token_memb_entry *memb_list;
 	unsigned int commit_token_size;
 
-	addr = (struct srp_addr *)commit_token->end_of_commit_token;
-	memb_list = (struct memb_commit_token_memb_entry *)(addr + commit_token->addr_entries);
-
 	commit_token->token_seq++;
+	commit_token->header.nodeid = instance->my_id.addr[0].nodeid;
 	commit_token_size = sizeof (struct memb_commit_token) +
 		((sizeof (struct srp_addr) +
 			sizeof (struct memb_commit_token_memb_entry)) * commit_token->addr_entries);
@@ -2801,14 +3156,10 @@ static int memb_state_commit_token_send_recovery (
 static int memb_state_commit_token_send (
 	struct totemsrp_instance *instance)
 {
-	struct srp_addr *addr;
-	struct memb_commit_token_memb_entry *memb_list;
 	unsigned int commit_token_size;
 
-	addr = (struct srp_addr *)instance->commit_token->end_of_commit_token;
-	memb_list = (struct memb_commit_token_memb_entry *)(addr + instance->commit_token->addr_entries);
-
 	instance->commit_token->token_seq++;
+	instance->commit_token->header.nodeid = instance->my_id.addr[0].nodeid;
 	commit_token_size = sizeof (struct memb_commit_token) +
 		((sizeof (struct srp_addr) +
 			sizeof (struct memb_commit_token_memb_entry)) * instance->commit_token->addr_entries);
@@ -2873,7 +3224,7 @@ static void memb_state_commit_token_create (
 	int token_memb_entries = 0;
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"Creating commit token because I am the rep.\n");
+		"Creating commit token because I am the rep.");
 
 	memb_set_subtract (token_memb, &token_memb_entries,
 		instance->my_proc_list, instance->my_proc_list_entries,
@@ -2911,7 +3262,7 @@ static void memb_state_commit_token_create (
 
 static void memb_join_message_send (struct totemsrp_instance *instance)
 {
-	char memb_join_data[10000];
+	char memb_join_data[40000];
 	struct memb_join *memb_join = (struct memb_join *)memb_join_data;
 	char *addr;
 	unsigned int addr_idx;
@@ -2963,7 +3314,7 @@ static void memb_join_message_send (struct totemsrp_instance *instance)
 
 static void memb_leave_message_send (struct totemsrp_instance *instance)
 {
-	char memb_join_data[10000];
+	char memb_join_data[40000];
 	struct memb_join *memb_join = (struct memb_join *)memb_join_data;
 	char *addr;
 	unsigned int addr_idx;
@@ -2971,7 +3322,7 @@ static void memb_leave_message_send (struct totemsrp_instance *instance)
 	struct srp_addr active_memb[PROCESSOR_COUNT_MAX];
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"sending join/leave message\n");
+		"sending join/leave message");
 
 	/*
 	 * add us to the failed list, and remove us from
@@ -3050,79 +3401,12 @@ static void memb_merge_detect_transmit (struct totemsrp_instance *instance)
 		sizeof (struct memb_merge_detect));
 }
 
-static void memb_ring_id_create_or_load (
-	struct totemsrp_instance *instance,
-	struct memb_ring_id *memb_ring_id)
-{
-	int fd;
-	int res;
-	char filename[256];
-
-	snprintf (filename, sizeof(filename), "%s/ringid_%s",
-		rundir, totemip_print (&instance->my_id.addr[0]));
-	fd = open (filename, O_RDONLY, 0700);
-	if (fd > 0) {
-		res = read (fd, &memb_ring_id->seq, sizeof (unsigned long long));
-		assert (res == sizeof (unsigned long long));
-		close (fd);
-	} else
-	if (fd == -1 && errno == ENOENT) {
-		memb_ring_id->seq = 0;
-		umask(0);
-		fd = open (filename, O_CREAT|O_RDWR, 0700);
-		if (fd == -1) {
-			char error_str[100];
-			strerror_r(errno, error_str, 100);
-			log_printf (instance->totemsrp_log_level_warning,
-				"Couldn't create %s %s\n", filename, error_str);
-		}
-		res = write (fd, &memb_ring_id->seq, sizeof (unsigned long long));
-		assert (res == sizeof (unsigned long long));
-		close (fd);
-	} else {
-		char error_str[100];
-		strerror_r(errno, error_str, 100);
-		log_printf (instance->totemsrp_log_level_warning,
-			"Couldn't open %s %s\n", filename, error_str);
-	}
-
-	totemip_copy(&memb_ring_id->rep, &instance->my_id.addr[0]);
-	assert (!totemip_zero_check(&memb_ring_id->rep));
-	instance->token_ring_id_seq = memb_ring_id->seq;
-}
-
-static void memb_ring_id_set_and_store (
+static void memb_ring_id_set (
 	struct totemsrp_instance *instance,
 	const struct memb_ring_id *ring_id)
 {
-	char filename[256];
-	int fd;
-	int res;
 
 	memcpy (&instance->my_ring_id, ring_id, sizeof (struct memb_ring_id));
-
-	snprintf (filename, sizeof(filename), "%s/ringid_%s",
-		rundir, totemip_print (&instance->my_id.addr[0]));
-
-	fd = open (filename, O_WRONLY, 0777);
-	if (fd == -1) {
-		fd = open (filename, O_CREAT|O_RDWR, 0777);
-	}
-	if (fd == -1) {
-		char error_str[100];
-		strerror_r(errno, error_str, 100);
-		log_printf (instance->totemsrp_log_level_warning,
-			"Couldn't store new ring id %llx to stable storage (%s)\n",
-				instance->my_ring_id.seq, error_str);
-		assert (0);
-		return;
-	}
-	log_printf (instance->totemsrp_log_level_debug,
-		"Storing new sequence id for ring %llx\n", instance->my_ring_id.seq);
-	//assert (fd > 0);
-	res = write (fd, &instance->my_ring_id.seq, sizeof (unsigned long long));
-	assert (res == sizeof (unsigned long long));
-	close (fd);
 }
 
 int totemsrp_callback_token_create (
@@ -3226,13 +3510,23 @@ static void token_callbacks_execute (
 static unsigned int backlog_get (struct totemsrp_instance *instance)
 {
 	unsigned int backlog = 0;
+	struct cs_queue *queue_use = NULL;
 
 	if (instance->memb_state == MEMB_STATE_OPERATIONAL) {
-		backlog = cs_queue_used (&instance->new_message_queue);
+		if (instance->waiting_trans_ack) {
+			queue_use = &instance->new_message_queue_trans;
+		} else {
+			queue_use = &instance->new_message_queue;
+		}
 	} else
 	if (instance->memb_state == MEMB_STATE_RECOVERY) {
-		backlog = cs_queue_used (&instance->retrans_message_queue);
+		queue_use = &instance->retrans_message_queue;
 	}
+
+	if (queue_use != NULL) {
+		backlog = cs_queue_used (queue_use);
+	}
+
 	instance->stats.token[instance->stats.latest_token].backlog_calc = backlog;
 	return (backlog);
 }
@@ -3275,7 +3569,9 @@ static void fcc_rtr_limit (
 	struct orf_token *token,
 	unsigned int *transmits_allowed)
 {
-	assert ((QUEUE_RTR_ITEMS_SIZE_MAX - *transmits_allowed - instance->totem_config->window_size) >= 0);
+	int check = QUEUE_RTR_ITEMS_SIZE_MAX;
+	check -= (*transmits_allowed + instance->totem_config->window_size);
+	assert (check >= 0);
 	if (sq_lt_compare (instance->last_released +
 		QUEUE_RTR_ITEMS_SIZE_MAX - *transmits_allowed -
 		instance->totem_config->window_size,
@@ -3293,7 +3589,6 @@ static void fcc_token_update (
 {
 	token->fcc += msgs_transmitted - instance->my_trc;
 	token->backlog += instance->my_cbl - instance->my_pbl;
-	assert (token->backlog >= 0);
 	instance->my_trc = msgs_transmitted;
 	instance->my_pbl = instance->my_cbl;
 }
@@ -3325,14 +3620,17 @@ static int message_handler_orf_token (
 	unsigned long long tv_current;
 	unsigned long long tv_diff;
 
-	tv_current = timerlist_nano_current_get ();
+	tv_current = qb_util_nano_current_get ();
 	tv_diff = tv_current - tv_old;
 	tv_old = tv_current;
 
 	log_printf (instance->totemsrp_log_level_debug,
-	"Time since last token %0.4f ms\n", ((float)tv_diff) / 1000000.0);
+	"Time since last token %0.4f ms", ((float)tv_diff) / 1000000.0);
 #endif
 
+	if (instance->orf_token_discard) {
+		return (0);
+	}
 #ifdef TEST_DROP_ORF_TOKEN_PERCENTAGE
 	if (random()%100 < TEST_DROP_ORF_TOKEN_PERCENTAGE) {
 		return (0);
@@ -3374,8 +3672,9 @@ static int message_handler_orf_token (
 		return (0);
 	}
 #endif
-
+	instance->flushing = 1;
 	totemrrp_recv_flush (instance->totemrrp_context);
+	instance->flushing = 0;
 
 	/*
 	 * Determine if we should hold (in reality drop) the token
@@ -3410,15 +3709,16 @@ static int message_handler_orf_token (
 
 	case MEMB_STATE_OPERATIONAL:
 		messages_free (instance, token->aru);
+		/*
+		 * Do NOT add break, this case should also execute code in gather case.
+		 */
+
 	case MEMB_STATE_GATHER:
 		/*
 		 * DO NOT add break, we use different free mechanism in recovery state
 		 */
 
 	case MEMB_STATE_RECOVERY:
-		last_aru = instance->my_last_aru;
-		instance->my_last_aru = token->aru;
-
 		/*
 		 * Discard tokens from another configuration
 		 */
@@ -3440,28 +3740,19 @@ static int message_handler_orf_token (
 		 * Discard retransmitted tokens
 		 */
 		if (sq_lte_compare (token->token_seq, instance->my_token_seq)) {
-			/*
-			 * If this processor receives a retransmitted token, it is sure
-		 	 * the previous processor is still alive.  As a result, it can
-			 * reset its token timeout.  If some processor previous to that
-			 * has failed, it will eventually not execute a reset of the
-			 * token timeout, and will cause a reconfiguration to occur.
-			 */
-			reset_token_timeout (instance);
-
-			if ((forward_token)
-				&& instance->use_heartbeat) {
-				reset_heartbeat_timeout(instance);
-			}
-			else {
-				cancel_heartbeat_timeout(instance);
-			}
-
 			return (0); /* discard token */
 		}
+		last_aru = instance->my_last_aru;
+		instance->my_last_aru = token->aru;
 
 		transmits_allowed = fcc_calculate (instance, token);
 		mcasted_retransmit = orf_token_rtr (instance, token, &transmits_allowed);
+
+		if (instance->my_token_held == 1 &&
+			(token->rtr_list_entries > 0 || mcasted_retransmit > 0)) {
+			instance->my_token_held = 0;
+			forward_token = 1;
+		}
 
 		fcc_rtr_limit (instance, token, &transmits_allowed);
 		mcasted_regular = orf_token_mcast (instance, token, transmits_allowed);
@@ -3491,22 +3782,24 @@ printf ("token seq %d\n", token->seq);
 			instance->my_aru_count = 0;
 		}
 
+		/*
+		 * We really don't follow specification there. In specification, OTHER nodes
+		 * detect failure of one node (based on aru_count) and my_id IS NEVER added
+		 * to failed list (so node never mark itself as failed)
+		 */
 		if (instance->my_aru_count > instance->totem_config->fail_to_recv_const &&
-			token->aru_addr != instance->my_id.addr[0].nodeid) {
+			token->aru_addr == instance->my_id.addr[0].nodeid) {
 
 			log_printf (instance->totemsrp_log_level_error,
-				"FAILED TO RECEIVE\n");
-// TODO if we fail to receive, it may be possible to end with a gather
-// state of proc == failed = 0 entries
-/* THIS IS A BIG TODO
-			memb_set_merge (&token->aru_addr, 1,
+				"FAILED TO RECEIVE");
+
+			instance->failed_to_recv = 1;
+
+			memb_set_merge (&instance->my_id, 1,
 				instance->my_failed_list,
 				&instance->my_failed_list_entries);
-*/
 
-			ring_state_restore (instance);
-
-			memb_state_gather_enter (instance, 6);
+			memb_state_gather_enter (instance, TOTEMSRP_GSFROM_FAILED_TO_RECEIVE);
 		} else {
 			instance->my_token_seq = token->token_seq;
 			token->token_seq += 1;
@@ -3529,7 +3822,7 @@ printf ("token seq %d\n", token->seq);
 					instance->my_set_retrans_flg = 0;
 				}
 				log_printf (instance->totemsrp_log_level_debug,
-					"token retrans flag is %d my set retrans flag%d retrans queue empty %d count %d, aru %x\n",
+					"token retrans flag is %d my set retrans flag%d retrans queue empty %d count %d, aru %x",
 					token->retrans_flg, instance->my_set_retrans_flg,
 					cs_queue_is_empty (&instance->retrans_message_queue),
 					instance->my_retrans_flg_count, token->aru);
@@ -3542,7 +3835,7 @@ printf ("token seq %d\n", token->seq);
 					instance->my_install_seq = token->seq;
 				}
 				log_printf (instance->totemsrp_log_level_debug,
-					"install seq %x aru %x high seq received %x\n",
+					"install seq %x aru %x high seq received %x",
 					instance->my_install_seq, instance->my_aru, instance->my_high_seq_received);
 				if (instance->my_retrans_flg_count >= 2 &&
 					instance->my_received_flg == 0 &&
@@ -3560,7 +3853,7 @@ printf ("token seq %d\n", token->seq);
 				}
 				if (instance->my_rotation_counter == 2) {
 				log_printf (instance->totemsrp_log_level_debug,
-					"retrans flag count %x token aru %x install seq %x aru %x %x\n",
+					"retrans flag count %x token aru %x install seq %x aru %x %x",
 					instance->my_retrans_flg_count, token->aru, instance->my_install_seq,
 					instance->my_aru, token->seq);
 
@@ -3574,11 +3867,11 @@ printf ("token seq %d\n", token->seq);
 			token_send (instance, token, forward_token);
 
 #ifdef GIVEINFO
-			tv_current = timerlist_nano_current_get ();
+			tv_current = qb_util_nano_current_get ();
 			tv_diff = tv_current - tv_old;
 			tv_old = tv_current;
 			log_printf (instance->totemsrp_log_level_debug,
-				"I held %0.4f ms\n",
+				"I held %0.4f ms",
 				((float)tv_diff) / 1000000.0);
 #endif
 			if (instance->memb_state == MEMB_STATE_OPERATIONAL) {
@@ -3632,8 +3925,8 @@ static void messages_deliver_to_app (
 	range = end_point - instance->my_high_delivered;
 
 	if (range) {
-		log_printf (instance->totemsrp_log_level_debug,
-			"Delivering %x to %x\n", instance->my_high_delivered,
+		log_printf (instance->totemsrp_log_level_trace,
+			"Delivering %x to %x", instance->my_high_delivered,
 			end_point);
 	}
 	assert (range < QUEUE_RTR_ITEMS_SIZE_MAX);
@@ -3701,8 +3994,8 @@ static void messages_deliver_to_app (
 		/*
 		 * Message found
 		 */
-		log_printf (instance->totemsrp_log_level_debug,
-			"Delivering MCAST message with seq %x to pending delivery queue\n",
+		log_printf (instance->totemsrp_log_level_trace,
+			"Delivering MCAST message with seq %x to pending delivery queue",
 			mcast_header.seq);
 
 		/*
@@ -3746,16 +4039,9 @@ static int message_handler_mcast (
 
 #ifdef TEST_DROP_MCAST_PERCENTAGE
 	if (random()%100 < TEST_DROP_MCAST_PERCENTAGE) {
-		printf ("dropping message %d\n", mcast_header.seq);
 		return (0);
-	} else {
-		printf ("accepting message %d\n", mcast_header.seq);
 	}
 #endif
-
-        if (srp_addr_equal (&mcast_header.system_from, &instance->my_id) == 0) {
-		cancel_token_retransmit_timeout (instance);
-	}
 
 	/*
 	 * If the message is foreign execute the switch below
@@ -3768,7 +4054,7 @@ static int message_handler_mcast (
 			memb_set_merge (
 				&mcast_header.system_from, 1,
 				instance->my_proc_list, &instance->my_proc_list_entries);
-			memb_state_gather_enter (instance, 7);
+			memb_state_gather_enter (instance, TOTEMSRP_GSFROM_FOREIGN_MESSAGE_IN_OPERATIONAL_STATE);
 			break;
 
 		case MEMB_STATE_GATHER:
@@ -3780,7 +4066,7 @@ static int message_handler_mcast (
 
 				memb_set_merge (&mcast_header.system_from, 1,
 					instance->my_proc_list, &instance->my_proc_list_entries);
-				memb_state_gather_enter (instance, 8);
+				memb_state_gather_enter (instance, TOTEMSRP_GSFROM_FOREIGN_MESSAGE_IN_GATHER_STATE);
 				return (0);
 			}
 			break;
@@ -3798,8 +4084,8 @@ static int message_handler_mcast (
 		return (0);
 	}
 
-	log_printf (instance->totemsrp_log_level_debug,
-		"Received ringid(%s:%lld) seq %x\n",
+	log_printf (instance->totemsrp_log_level_trace,
+		"Received ringid(%s:%lld) seq %x",
 		totemip_print (&mcast_header.ring_id.rep),
 		mcast_header.ring_id.seq,
 		mcast_header.seq);
@@ -3816,7 +4102,7 @@ static int message_handler_mcast (
 		 * Allocate new multicast memory block
 		 */
 // TODO LEAK
-		sort_queue_item.mcast = malloc (msg_len);
+		sort_queue_item.mcast = totemsrp_buffer_alloc (instance);
 		if (sort_queue_item.mcast == NULL) {
 			return (-1); /* error here is corrected by the algorithm */
 		}
@@ -3872,7 +4158,7 @@ static int message_handler_memb_merge_detect (
 	case MEMB_STATE_OPERATIONAL:
 		memb_set_merge (&memb_merge_detect.system_from, 1,
 			instance->my_proc_list, &instance->my_proc_list_entries);
-		memb_state_gather_enter (instance, 9);
+		memb_state_gather_enter (instance, TOTEMSRP_GSFROM_MERGE_DURING_OPERATIONAL_STATE);
 		break;
 
 	case MEMB_STATE_GATHER:
@@ -3884,7 +4170,7 @@ static int message_handler_memb_merge_detect (
 
 			memb_set_merge (&memb_merge_detect.system_from, 1,
 				instance->my_proc_list, &instance->my_proc_list_entries);
-			memb_state_gather_enter (instance, 10);
+			memb_state_gather_enter (instance, TOTEMSRP_GSFROM_MERGE_DURING_GATHER_STATE);
 			return (0);
 		}
 		break;
@@ -3900,12 +4186,15 @@ static int message_handler_memb_merge_detect (
 	return (0);
 }
 
-static int memb_join_process (
+static void memb_join_process (
 	struct totemsrp_instance *instance,
 	const struct memb_join *memb_join)
 {
 	struct srp_addr *proc_list;
 	struct srp_addr *failed_list;
+	int gather_entered = 0;
+	int fail_minus_memb_entries = 0;
+	struct srp_addr fail_minus_memb[PROCESSOR_COUNT_MAX];
 
 	proc_list = (struct srp_addr *)memb_join->end_of_memb_join;
 	failed_list = proc_list + memb_join->proc_list_entries;
@@ -3915,7 +4204,34 @@ static int memb_join_process (
 	memb_set_print ("faillist", failed_list, memb_join->failed_list_entries);
 	memb_set_print ("my_proclist", instance->my_proc_list, instance->my_proc_list_entries);
 	memb_set_print ("my_faillist", instance->my_failed_list, instance->my_failed_list_entries);
-*/
+-*/
+
+	if (memb_join->header.type == MESSAGE_TYPE_MEMB_JOIN) {
+		if (instance->flushing) {
+			if (memb_join->header.nodeid == LEAVE_DUMMY_NODEID) {
+				log_printf (instance->totemsrp_log_level_warning,
+			    		"Discarding LEAVE message during flush, nodeid=%u", 
+						memb_join->failed_list_entries > 0 ? failed_list[memb_join->failed_list_entries - 1 ].addr[0].nodeid : LEAVE_DUMMY_NODEID);
+				if (memb_join->failed_list_entries > 0) {
+					my_leave_memb_set(instance, failed_list[memb_join->failed_list_entries - 1 ].addr[0].nodeid);
+				}
+			} else {
+				log_printf (instance->totemsrp_log_level_warning,
+			    		"Discarding JOIN message during flush, nodeid=%d", memb_join->header.nodeid);
+			}
+			return;
+		} else {
+			if (memb_join->header.nodeid == LEAVE_DUMMY_NODEID) {
+				log_printf (instance->totemsrp_log_level_debug,
+				    "Received LEAVE message from %u", memb_join->failed_list_entries > 0 ? failed_list[memb_join->failed_list_entries - 1 ].addr[0].nodeid : LEAVE_DUMMY_NODEID);
+				if (memb_join->failed_list_entries > 0) {
+					my_leave_memb_set(instance, failed_list[memb_join->failed_list_entries - 1 ].addr[0].nodeid);
+				}
+			}
+		}
+		
+	}
+
 	if (memb_set_equal (proc_list,
 		memb_join->proc_list_entries,
 		instance->my_proc_list,
@@ -3928,6 +4244,18 @@ static int memb_join_process (
 
 		memb_consensus_set (instance, &memb_join->system_from);
 
+		if (memb_consensus_agreed (instance) && instance->failed_to_recv == 1) {
+				instance->failed_to_recv = 0;
+				srp_addr_copy (&instance->my_proc_list[0],
+					&instance->my_id);
+				instance->my_proc_list_entries = 1;
+				instance->my_failed_list_entries = 0;
+
+				memb_state_commit_token_create (instance);
+
+				memb_state_commit_enter (instance);
+				return;
+		}
 		if (memb_consensus_agreed (instance) &&
 			memb_lowest_in_config (instance)) {
 
@@ -3935,7 +4263,7 @@ static int memb_join_process (
 
 			memb_state_commit_enter (instance);
 		} else {
-			return (0);
+			goto out;
 		}
 	} else
 	if (memb_set_subset (proc_list,
@@ -3948,12 +4276,12 @@ static int memb_join_process (
 		instance->my_failed_list,
 		instance->my_failed_list_entries)) {
 
-		return (0);
+		goto out;
 	} else
 	if (memb_set_subset (&memb_join->system_from, 1,
 		instance->my_failed_list, instance->my_failed_list_entries)) {
 
-		return (0);
+		goto out;
 	} else {
 		memb_set_merge (proc_list,
 			memb_join->proc_list_entries,
@@ -3967,14 +4295,44 @@ static int memb_join_process (
 				&memb_join->system_from, 1,
 				instance->my_failed_list, &instance->my_failed_list_entries);
 		} else {
-			memb_set_merge (failed_list,
-				memb_join->failed_list_entries,
-				instance->my_failed_list, &instance->my_failed_list_entries);
+			if (memb_set_subset (
+				&memb_join->system_from, 1,
+				instance->my_memb_list,
+				instance->my_memb_entries)) {
+
+				if (memb_set_subset (
+					&memb_join->system_from, 1,
+					instance->my_failed_list,
+					instance->my_failed_list_entries) == 0) {
+
+					memb_set_merge (failed_list,
+						memb_join->failed_list_entries,
+						instance->my_failed_list, &instance->my_failed_list_entries);
+				} else {
+					memb_set_subtract (fail_minus_memb,
+						&fail_minus_memb_entries,
+						failed_list,
+						memb_join->failed_list_entries,
+						instance->my_memb_list,
+						instance->my_memb_entries);
+
+					memb_set_merge (fail_minus_memb,
+						fail_minus_memb_entries,
+						instance->my_failed_list,
+						&instance->my_failed_list_entries);
+				}
+			}
 		}
-		memb_state_gather_enter (instance, 11);
-		return (1); /* gather entered */
+		memb_state_gather_enter (instance, TOTEMSRP_GSFROM_MERGE_DURING_JOIN);
+		gather_entered = 1;
 	}
-	return (0); /* gather not entered */
+
+out:
+	if (gather_entered == 0 &&
+		instance->memb_state == MEMB_STATE_OPERATIONAL) {
+
+		memb_state_gather_enter (instance, TOTEMSRP_GSFROM_JOIN_DURING_OPERATIONAL_STATE);
+	}
 }
 
 static void memb_join_endian_convert (const struct memb_join *in, struct memb_join *out)
@@ -4097,6 +4455,36 @@ static void memb_merge_detect_endian_convert (
 	srp_addr_copy_endian_convert (&out->system_from, &in->system_from);
 }
 
+static int ignore_join_under_operational (
+	struct totemsrp_instance *instance,
+	const struct memb_join *memb_join)
+{
+	struct srp_addr *proc_list;
+	struct srp_addr *failed_list;
+	unsigned long long ring_seq;
+
+	proc_list = (struct srp_addr *)memb_join->end_of_memb_join;
+	failed_list = proc_list + memb_join->proc_list_entries;
+	ring_seq = memb_join->ring_seq;
+
+	if (memb_set_subset (&instance->my_id, 1,
+	    failed_list, memb_join->failed_list_entries)) {
+		return (1);
+	}
+
+	/*
+	 * In operational state, my_proc_list is exactly the same as
+	 * my_memb_list.
+	 */
+	if ((memb_set_subset (&memb_join->system_from, 1,
+	    instance->my_memb_list, instance->my_memb_entries)) &&
+	    (ring_seq < instance->my_ring_id.seq)) {
+		return (1);
+	}
+
+	return (0);
+}
+
 static int message_handler_memb_join (
 	struct totemsrp_instance *instance,
 	const void *msg,
@@ -4105,7 +4493,6 @@ static int message_handler_memb_join (
 {
 	const struct memb_join *memb_join;
 	struct memb_join *memb_join_convert = alloca (msg_len);
-	int gather_entered;
 
 	if (endian_conversion_needed) {
 		memb_join = memb_join_convert;
@@ -4128,10 +4515,8 @@ static int message_handler_memb_join (
 	}
 	switch (instance->memb_state) {
 		case MEMB_STATE_OPERATIONAL:
-			gather_entered = memb_join_process (instance,
-				memb_join);
-			if (gather_entered == 0) {
-				memb_state_gather_enter (instance, 12);
+			if (!ignore_join_under_operational (instance, memb_join)) {
+				memb_join_process (instance, memb_join);
 			}
 			break;
 
@@ -4148,7 +4533,7 @@ static int message_handler_memb_join (
 				memb_join->ring_seq >= instance->my_ring_id.seq) {
 
 				memb_join_process (instance, memb_join);
-				memb_state_gather_enter (instance, 13);
+				memb_state_gather_enter (instance, TOTEMSRP_GSFROM_JOIN_DURING_COMMIT_STATE);
 			}
 			break;
 
@@ -4160,10 +4545,9 @@ static int message_handler_memb_join (
 
 				memb_join->ring_seq >= instance->my_ring_id.seq) {
 
-				ring_state_restore (instance);
-
 				memb_join_process (instance, memb_join);
-				memb_state_gather_enter (instance, 14);
+				memb_recovery_state_token_loss (instance);
+				memb_state_gather_enter (instance, TOTEMSRP_GSFROM_JOIN_DURING_RECOVERY);
 			}
 			break;
 	}
@@ -4182,10 +4566,9 @@ static int message_handler_memb_commit_token (
 	int sub_entries;
 
 	struct srp_addr *addr;
-	struct memb_commit_token_memb_entry *memb_list;
 
 	log_printf (instance->totemsrp_log_level_debug,
-		"got commit token\n");
+		"got commit token");
 
 	if (endian_conversion_needed) {
 		memb_commit_token_endian_convert (msg, memb_commit_token_convert);
@@ -4194,7 +4577,6 @@ static int message_handler_memb_commit_token (
 	}
 	memb_commit_token = memb_commit_token_convert;
 	addr = (struct srp_addr *)memb_commit_token->end_of_commit_token;
-	memb_list = (struct memb_commit_token_memb_entry *)(addr + memb_commit_token->addr_entries);
 
 #ifdef TEST_DROP_COMMIT_TOKEN_PERCENTAGE
 	if (random()%100 < TEST_DROP_COMMIT_TOKEN_PERCENTAGE) {
@@ -4238,8 +4620,16 @@ static int message_handler_memb_commit_token (
 
 		case MEMB_STATE_RECOVERY:
 			if (totemip_equal (&instance->my_id.addr[0], &instance->my_ring_id.rep)) {
+
+				/* Filter out duplicated tokens */
+				if (instance->originated_orf_token) {
+					break;
+				}
+
+				instance->originated_orf_token = 1;
+
 				log_printf (instance->totemsrp_log_level_debug,
-					"Sending initial ORF token\n");
+					"Sending initial ORF token");
 
 				// TODO convert instead of initiate
 				orf_token_send_initial (instance);
@@ -4280,17 +4670,11 @@ void main_deliver_fn (
 
 	if (msg_len < sizeof (struct message_header)) {
 		log_printf (instance->totemsrp_log_level_security,
-			    "Received message is too short...  ignoring %u.\n",
+			    "Received message is too short...  ignoring %u.",
 			    (unsigned int)msg_len);
 		return;
 	}
 
-	if ((int)message_header->type >= totemsrp_message_handlers.count) {
-		log_printf (instance->totemsrp_log_level_security, "Type of received message is wrong...  ignoring %d.\n", (int)message_header->type);
-printf ("wrong message type\n");
-		instance->stats.rx_msg_dropped++;
-		return;
-	}
 
 	switch (message_header->type) {
 	case MESSAGE_TYPE_ORF_TOKEN:
@@ -4312,7 +4696,10 @@ printf ("wrong message type\n");
 		instance->stats.token_hold_cancel_rx++;
 		break;
 	default:
-		break;
+		log_printf (instance->totemsrp_log_level_security, "Type of received message is wrong...  ignoring %d.\n", (int)message_header->type);
+printf ("wrong message type\n");
+		instance->stats.rx_msg_dropped++;
+		return;
 	}
 	/*
 	 * Handle incoming message
@@ -4330,6 +4717,7 @@ void main_iface_change_fn (
 	unsigned int iface_no)
 {
 	struct totemsrp_instance *instance = context;
+	int i;
 
 	totemip_copy (&instance->my_id.addr[iface_no], iface_addr);
 	assert (instance->my_id.addr[iface_no].nodeid);
@@ -4337,19 +4725,29 @@ void main_iface_change_fn (
 	totemip_copy (&instance->my_memb_list[0].addr[iface_no], iface_addr);
 
 	if (instance->iface_changes++ == 0) {
-		memb_ring_id_create_or_load (instance, &instance->my_ring_id);
+		instance->memb_ring_id_create_or_load (&instance->my_ring_id,
+		    &instance->my_id.addr[0]);
+		instance->token_ring_id_seq = instance->my_ring_id.seq;
 		log_printf (
 			instance->totemsrp_log_level_debug,
-			"Created or loaded sequence id %lld.%s for this ring.\n",
+			"Created or loaded sequence id %llx.%s for this ring.",
 			instance->my_ring_id.seq,
 			totemip_print (&instance->my_ring_id.rep));
+
 		if (instance->totemsrp_service_ready_fn) {
 			instance->totemsrp_service_ready_fn ();
 		}
 
 	}
+
+	for (i = 0; i < instance->totem_config->interfaces[iface_no].member_count; i++) {
+		totemsrp_member_add (instance,
+			&instance->totem_config->interfaces[iface_no].member_list[i],
+			iface_no);
+	}
+
 	if (instance->iface_changes >= instance->totem_config->interface_count) {
-		memb_state_gather_enter (instance, 15);
+		memb_state_gather_enter (instance, TOTEMSRP_GSFROM_INTERFACE_CHANGE);
 	}
 }
 
@@ -4364,4 +4762,45 @@ void totemsrp_service_ready_register (
 	struct totemsrp_instance *instance = (struct totemsrp_instance *)context;
 
 	instance->totemsrp_service_ready_fn = totem_service_ready;
+}
+
+int totemsrp_member_add (
+        void *context,
+        const struct totem_ip_address *member,
+        int ring_no)
+{
+	struct totemsrp_instance *instance = (struct totemsrp_instance *)context;
+	int res;
+
+	res = totemrrp_member_add (instance->totemrrp_context, member, ring_no);
+
+	return (res);
+}
+
+int totemsrp_member_remove (
+        void *context,
+        const struct totem_ip_address *member,
+        int ring_no)
+{
+	struct totemsrp_instance *instance = (struct totemsrp_instance *)context;
+	int res;
+
+	res = totemrrp_member_remove (instance->totemrrp_context, member, ring_no);
+
+	return (res);
+}
+
+void totemsrp_threaded_mode_enable (void *context)
+{
+	struct totemsrp_instance *instance = (struct totemsrp_instance *)context;
+
+	instance->threaded_mode_enabled = 1;
+}
+
+void totemsrp_trans_ack (void *context)
+{
+	struct totemsrp_instance *instance = (struct totemsrp_instance *)context;
+
+	instance->waiting_trans_ack = 0;
+	instance->totemsrp_waiting_trans_ack_cb_fn (0);
 }

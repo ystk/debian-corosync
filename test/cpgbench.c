@@ -46,30 +46,38 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/uio.h>
 #include <sys/un.h>
-#include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+
+#include <qb/qblog.h>
+#include <qb/qbutil.h>
 
 #include <corosync/corotypes.h>
 #include <corosync/cpg.h>
 
-#ifdef COROSYNC_SOLARIS
+static cpg_handle_t handle;
+
+static pthread_t thread;
+
+#ifndef timersub
 #define timersub(a, b, result)						\
-    do {								\
-	(result)->tv_sec = (a)->tv_sec - (b)->tv_sec;			\
-	(result)->tv_usec = (a)->tv_usec - (b)->tv_usec;		\
-	if ((result)->tv_usec < 0) {					\
-	    --(result)->tv_sec;						\
-	    (result)->tv_usec += 1000000;				\
-	}								\
-    } while (0)
-#endif
+	do {								\
+		(result)->tv_sec = (a)->tv_sec - (b)->tv_sec;		\
+		(result)->tv_usec = (a)->tv_usec - (b)->tv_usec;	\
+		if ((result)->tv_usec < 0) {				\
+			--(result)->tv_sec;				\
+			(result)->tv_usec += 1000000;			\
+		}							\
+	} while (0)
+#endif /* timersub */
 
 static int alarm_notice;
 
 static void cpg_bm_confchg_fn (
-	cpg_handle_t handle,
+	cpg_handle_t handle_in,
 	const struct cpg_name *group_name,
 	const struct cpg_address *member_list, size_t member_list_entries,
 	const struct cpg_address *left_list, size_t left_list_entries,
@@ -80,7 +88,7 @@ static void cpg_bm_confchg_fn (
 static unsigned int write_count;
 
 static void cpg_bm_deliver_fn (
-        cpg_handle_t handle,
+        cpg_handle_t handle_in,
         const struct cpg_name *group_name,
         uint32_t nodeid,
         uint32_t pid,
@@ -95,16 +103,16 @@ static cpg_callbacks_t callbacks = {
 	.cpg_confchg_fn		= cpg_bm_confchg_fn
 };
 
-static char data[500000];
+#define ONE_MEG 1048576
+static char data[ONE_MEG];
 
 static void cpg_benchmark (
-	cpg_handle_t handle,
+	cpg_handle_t handle_in,
 	int write_size)
 {
 	struct timeval tv1, tv2, tv_elapsed;
 	struct iovec iov;
 	unsigned int res;
-	cpg_flow_control_state_t flow_control_state;
 
 	alarm_notice = 0;
 	iov.iov_base = data;
@@ -115,23 +123,8 @@ static void cpg_benchmark (
 
 	gettimeofday (&tv1, NULL);
 	do {
-		/*
-		 * Test checkpoint write
-		 */
-		cpg_flow_control_state_get (handle, &flow_control_state);
-		if (flow_control_state == CPG_FLOW_CONTROL_DISABLED) {
-retry:
-			res = cpg_mcast_joined (handle, CPG_TYPE_AGREED, &iov, 1);
-			if (res == CS_ERR_TRY_AGAIN) {
-				goto retry;
-			}
-		}
-		res = cpg_dispatch (handle, CS_DISPATCH_ALL);
-		if (res != CS_OK) {
-			printf ("cpg dispatch returned error %d\n", res);
-			exit (1);
-		}
-	} while (alarm_notice == 0);
+		res = cpg_mcast_joined (handle_in, CPG_TYPE_AGREED, &iov, 1);
+	} while (alarm_notice == 0 && (res == CS_OK || res == CS_ERR_TRY_AGAIN));
 	gettimeofday (&tv2, NULL);
 	timersub (&tv2, &tv1, &tv_elapsed);
 
@@ -155,19 +148,31 @@ static struct cpg_name group_name = {
 	.length = 6
 };
 
+static void* dispatch_thread (void *arg)
+{
+	cpg_dispatch (handle, CS_DISPATCH_BLOCKING);
+	return NULL;
+}
+
 int main (void) {
-	cpg_handle_t handle;
 	unsigned int size;
 	int i;
 	unsigned int res;
 
-	size = 1000;
+	qb_log_init("cpgbench", LOG_USER, LOG_EMERG);
+	qb_log_ctl(QB_LOG_SYSLOG, QB_LOG_CONF_ENABLED, QB_FALSE);
+	qb_log_filter_ctl(QB_LOG_STDERR, QB_LOG_FILTER_ADD,
+			  QB_LOG_FILTER_FILE, "*", LOG_DEBUG);
+	qb_log_ctl(QB_LOG_STDERR, QB_LOG_CONF_ENABLED, QB_TRUE);
+
+	size = 64;
 	signal (SIGALRM, sigalrm_handler);
 	res = cpg_initialize (&handle, &callbacks);
 	if (res != CS_OK) {
 		printf ("cpg_initialize failed with result %d\n", res);
 		exit (1);
 	}
+	pthread_create (&thread, NULL, dispatch_thread, NULL);
 
 	res = cpg_join (handle, &group_name);
 	if (res != CS_OK) {
@@ -175,15 +180,18 @@ int main (void) {
 		exit (1);
 	}
 
-	for (i = 0; i < 50; i++) { /* number of repetitions - up to 50k */
+	for (i = 0; i < 10; i++) { /* number of repetitions - up to 50k */
 		cpg_benchmark (handle, size);
 		signal (SIGALRM, sigalrm_handler);
-		size += 1000;
+		size *= 5;
+		if (size >= (ONE_MEG - 100)) {
+			break;
+		}
 	}
 
 	res = cpg_finalize (handle);
 	if (res != CS_OK) {
-		printf ("cpg_join failed with result %d\n", res);
+		printf ("cpg_finalize failed with result %d\n", res);
 		exit (1);
 	}
 	return (0);

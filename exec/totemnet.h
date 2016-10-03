@@ -32,6 +32,14 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
+
+/**
+ * @file
+ * Totem Network interface - also does encryption/decryption
+ *
+ * depends on poll abstraction, POSIX, IPV4
+ */
+
 #ifndef TOTEMNET_H_DEFINED
 #define TOTEMNET_H_DEFINED
 
@@ -42,18 +50,15 @@
 
 #define TOTEMNET_NOFLUSH	0
 #define TOTEMNET_FLUSH		1
-/*
- * Totem Network interface - also does encryption/decryption
- * depends on poll abstraction, POSIX, IPV4
- */
 
-/*
+/**
  * Create an instance
  */
 extern int totemnet_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t *poll_handle,
 	void **net_context,
 	struct totem_config *totem_config,
+	totemsrp_stats_t *stats,
 	int interface_no,
 	void *context,
 
@@ -68,6 +73,10 @@ extern int totemnet_initialize (
 
 	void (*target_set_completed) (
 		void *context));
+
+extern void *totemnet_buffer_alloc (void *net_context);
+
+extern void totemnet_buffer_release (void *net_context, void *ptr);
 
 extern int totemnet_processor_count_set (
 	void *net_context,
@@ -110,9 +119,23 @@ extern int totemnet_token_target_set (
 
 extern int totemnet_crypto_set (
 	void *net_context,
-	unsigned int type);
+	const char *cipher_type,
+	const char *hash_type);
 
 extern int totemnet_recv_mcast_empty (
 	void *net_context);
+
+extern int totemnet_member_add (
+	void *net_context,
+	const struct totem_ip_address *member);
+
+extern int totemnet_member_remove (
+	void *net_context,
+	const struct totem_ip_address *member);
+
+extern int totemnet_member_set_active (
+	void *net_context,
+	const struct totem_ip_address *member,
+	int active);
 
 #endif /* TOTEMNET_H_DEFINED */

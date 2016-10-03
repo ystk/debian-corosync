@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2003-2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2007, 2009 Red Hat, Inc.
+ * Copyright (c) 2006-2011 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -32,22 +32,25 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
+
+/**
+ * @file
+ * Totem Single Ring Protocol
+ *
+ * depends on poll abstraction, POSIX, IPV4
+ */
+
 #ifndef TOTEMSRP_H_DEFINED
 #define TOTEMSRP_H_DEFINED
 
 #include <corosync/totem/totem.h>
-#include <corosync/totem/coropoll.h>
+#include <qb/qbloop.h>
 
-/*
- * Totem Single Ring Protocol
- * depends on poll abstraction, POSIX, IPV4
- */
-
-/*
+/**
  * Create a protocol instance
  */
 int totemsrp_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t *poll_handle,
 	void **srp_context,
 	struct totem_config *totem_config,
 	totemmrp_stats_t *stats,
@@ -62,11 +65,13 @@ int totemsrp_initialize (
 		const unsigned int *member_list, size_t member_list_entries,
 		const unsigned int *left_list, size_t left_list_entries,
 		const unsigned int *joined_list, size_t joined_list_entries,
-		const struct memb_ring_id *ring_id));
+		const struct memb_ring_id *ring_id),
+	void (*waiting_trans_ack_cb_fn) (
+		int waiting_trans_ack));
 
 void totemsrp_finalize (void *srp_context);
 
-/*
+/**
  * Multicast a message
  */
 int totemsrp_mcast (
@@ -75,7 +80,7 @@ int totemsrp_mcast (
 	unsigned int iov_len,
 	int priority);
 
-/*
+/**
  * Return number of available messages that can be queued
  */
 int totemsrp_avail (void *srp_context);
@@ -100,6 +105,7 @@ extern int totemsrp_ifaces_get (
 	void *srp_context,
 	unsigned int nodeid,
 	struct totem_ip_address *interfaces,
+	unsigned int interfaces_size,
 	char ***status,
 	unsigned int *iface_count);
 
@@ -111,7 +117,8 @@ extern int totemsrp_my_family_get (
 
 extern int totemsrp_crypto_set (
 	void *srp_context,
-	unsigned int type);
+	const char *cipher_type,
+	const char *hash_type);
 
 extern int totemsrp_ring_reenable (
 	void *srp_context);
@@ -119,5 +126,21 @@ extern int totemsrp_ring_reenable (
 void totemsrp_service_ready_register (
 	void *srp_context,
 	void (*totem_service_ready) (void));
+
+extern int totemsrp_member_add (
+	void *srp_context,
+	const struct totem_ip_address *member,
+	int ring_no);
+	
+extern int totemsrp_member_remove (
+	void *srp_context,
+	const struct totem_ip_address *member,
+	int ring_no);
+	
+void totemsrp_threaded_mode_enable (
+	void *srp_context);
+
+void totemsrp_trans_ack (
+	void *srp_context);
 
 #endif /* TOTEMSRP_H_DEFINED */

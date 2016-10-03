@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009 Red Hat, Inc.
+ * Copyright (c) 2009-2011 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -81,6 +81,9 @@ static void fprint_addrs(FILE *f, int nodeid)
 				saddr = &sin->sin_addr;
 
 			inet_ntop(ss->ss_family, saddr, buf, sizeof(buf));
+			if (i != 0) {
+				fprintf(f, " ");
+			}
 			fprintf(f, "%s", buf);
 		}
 	}

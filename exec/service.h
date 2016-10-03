@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2002-2006 MontaVista Software, Inc.
- * Copyright (c) 2006-2007, 2009 Red Hat, Inc.
+ * Copyright (c) 2006-2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -36,17 +36,23 @@
 #define COROSYNC_SERVICE_H_DEFINED
 
 #include <corosync/hdb.h>
-/*
- * Link and initialize a service
- */
+
 struct corosync_api_v1;
 
-extern unsigned int corosync_service_link_and_init (
-	struct corosync_api_v1 *objdb,
-	const char *service_name,
-	unsigned int service_ver);
+struct default_service {
+	const char *name;
+	int ver;
+	struct corosync_service_engine *(*loader)(void);
+};
 
-/*
+/**
+ * Link and initialize a service
+ */
+char *corosync_service_link_and_init (
+	struct corosync_api_v1 *objdb,
+	struct default_service *service_engine);
+
+/**
  * Unlink and exit a service
  */
 extern unsigned int corosync_service_unlink_and_exit (
@@ -54,23 +60,32 @@ extern unsigned int corosync_service_unlink_and_exit (
 	const char *service_name,
 	unsigned int service_ver);
 
-/*
+/**
  * Unlink and exit all corosync services
  */
 extern void corosync_service_unlink_all (
 	struct corosync_api_v1 *api,
 	void (*unlink_all_complete) (void));
 
-/*
+/**
  * Load all of the default services
  */
 extern unsigned int corosync_service_defaults_link_and_init (
 	struct corosync_api_v1 *objdb);
 
-extern struct corosync_service_engine *ais_service[];
+extern struct corosync_service_engine *corosync_service[];
 
-extern int ais_service_exiting[];
+extern const char *service_stats_rx[SERVICES_COUNT_MAX][SERVICE_HANDLER_MAXIMUM_COUNT];
+extern const char *service_stats_tx[SERVICES_COUNT_MAX][SERVICE_HANDLER_MAXIMUM_COUNT];
 
-extern hdb_handle_t service_stats_handle[SERVICE_HANDLER_MAXIMUM_COUNT][64];
+struct corosync_service_engine *votequorum_get_service_engine_ver0 (void);
+struct corosync_service_engine *vsf_quorum_get_service_engine_ver0 (void);
+struct corosync_service_engine *quorum_get_service_handler_ver0 (void);
+struct corosync_service_engine *pload_get_service_engine_ver0 (void);
+struct corosync_service_engine *cfg_get_service_engine_ver0 (void);
+struct corosync_service_engine *cpg_get_service_engine_ver0 (void);
+struct corosync_service_engine *mon_get_service_engine_ver0 (void);
+struct corosync_service_engine *wd_get_service_engine_ver0 (void);
+struct corosync_service_engine *cmap_get_service_engine_ver0 (void);
 
 #endif /* SERVICE_H_DEFINED */

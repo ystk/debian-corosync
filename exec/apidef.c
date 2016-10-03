@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009 Red Hat, Inc.
+ * Copyright (c) 2008-2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -37,22 +37,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <qb/qbutil.h>
+#include <qb/qbloop.h>
+#include <qb/qbipcs.h>
+
 #include <corosync/corotypes.h>
-#include <corosync/coroipc_types.h>
-#include <corosync/lcr/lcr_ifact.h>
 #include <corosync/totem/totempg.h>
 #include <corosync/totem/totemip.h>
 #include <corosync/totem/totem.h>
-#include <corosync/engine/logsys.h>
-#include <corosync/coroipcs.h>
+#include <corosync/logsys.h>
 #include "util.h"
 #include "timer.h"
-#include "sync.h"
 #include "quorum.h"
 #include "schedwrk.h"
 #include "main.h"
 #include "apidef.h"
-#include <corosync/engine/coroapi.h>
 #include "service.h"
 
 LOGSYS_DECLARE_SUBSYS ("APIDEF");
@@ -61,23 +60,23 @@ LOGSYS_DECLARE_SUBSYS ("APIDEF");
  * Remove compile warnings about type name changes in corosync_tpg_group
  */
 typedef int (*typedef_tpg_join) (
-	hdb_handle_t,
+	void *,
 	const struct corosync_tpg_group *,
 	size_t);
 
-typedef int (*typedef_tpg_leave) (hdb_handle_t,
+typedef int (*typedef_tpg_leave) (void *,
 	const struct corosync_tpg_group *,
 	size_t);
 
 typedef int (*typedef_tpg_groups_mcast_groups) (
-	hdb_handle_t, int,
+	void *, int,
 	const struct corosync_tpg_group *,
 	size_t groups_cnt,
 	const struct iovec *,
 	unsigned int);
 
 typedef int (*typedef_tpg_groups_send_ok) (
-	hdb_handle_t,
+	void *,
 	const struct corosync_tpg_group *,
 	size_t groups_cnt,
 	struct iovec *,
@@ -86,7 +85,7 @@ typedef int (*typedef_tpg_groups_send_ok) (
 static inline void _corosync_public_exit_error (cs_fatal_error_t err,
 						const char *file,
 						unsigned int line)
-  __attribute__((__noreturn__));
+  __attribute__((noreturn));
 static inline void _corosync_public_exit_error (
 	cs_fatal_error_t err, const char *file, unsigned int line)
 {
@@ -97,17 +96,17 @@ static struct corosync_api_v1 apidef_corosync_api_v1 = {
 	.timer_add_duration = corosync_timer_add_duration,
 	.timer_add_absolute = corosync_timer_add_absolute,
 	.timer_delete = corosync_timer_delete,
-	.timer_time_get = corosync_timer_time_get,
+	.timer_time_get = cs_timer_time_get,
 	.timer_expire_time_get = corosync_timer_expire_time_get,
 	.ipc_source_set = message_source_set,
 	.ipc_source_is_local = message_source_is_local,
-	.ipc_private_data_get = coroipcs_private_data_get,
-	.ipc_response_iov_send = coroipcs_response_iov_send,
-	.ipc_response_send = coroipcs_response_send,
-	.ipc_dispatch_send = coroipcs_dispatch_send,
-	.ipc_dispatch_iov_send = coroipcs_dispatch_iov_send,
-	.ipc_refcnt_inc =  coroipcs_refcount_inc,
-	.ipc_refcnt_dec = coroipcs_refcount_dec,
+	.ipc_private_data_get = cs_ipcs_private_data_get,
+	.ipc_response_iov_send = cs_ipcs_response_iov_send,
+	.ipc_response_send = cs_ipcs_response_send,
+	.ipc_dispatch_send = cs_ipcs_dispatch_send,
+	.ipc_dispatch_iov_send = cs_ipcs_dispatch_iov_send,
+	.ipc_refcnt_inc =  cs_ipc_refcnt_inc,
+	.ipc_refcnt_dec = cs_ipc_refcnt_dec,
 	.totem_nodeid_get = totempg_my_nodeid_get,
 	.totem_family_get = totempg_my_family_get,
 	.totem_ring_reenable = totempg_ring_reenable,
@@ -136,48 +135,14 @@ static struct corosync_api_v1 apidef_corosync_api_v1 = {
 	.quorum_register_callback = corosync_quorum_register_callback,
 	.quorum_unregister_callback = corosync_quorum_unregister_callback,
 	.quorum_initialize = corosync_quorum_initialize,
-	.service_link_and_init = corosync_service_link_and_init,
-	.service_unlink_and_exit = corosync_service_unlink_and_exit,
-	.plugin_interface_reference = lcr_ifact_reference,
-	.plugin_interface_release = lcr_ifact_release,
 	.error_memory_failure = _corosync_out_of_memory_error,
 	.fatal_error = _corosync_public_exit_error,
 	.shutdown_request = corosync_shutdown_request,
 	.state_dump = corosync_state_dump,
-	.poll_handle_get = corosync_poll_handle_get
+	.poll_handle_get = cs_poll_handle_get,
+	.poll_dispatch_add = cs_poll_dispatch_add,
+	.poll_dispatch_delete = cs_poll_dispatch_delete
 };
-
-void apidef_init (struct objdb_iface_ver0 *objdb) {
-	apidef_corosync_api_v1.object_create = objdb->object_create;
-	apidef_corosync_api_v1.object_priv_set = objdb->object_priv_set;
-	apidef_corosync_api_v1.object_key_create = objdb->object_key_create;
-	apidef_corosync_api_v1.object_destroy = objdb->object_destroy;
-	apidef_corosync_api_v1.object_valid_set = objdb->object_valid_set;
-	apidef_corosync_api_v1.object_key_valid_set = objdb->object_key_valid_set;
-	apidef_corosync_api_v1.object_find_create = objdb->object_find_create;
-	apidef_corosync_api_v1.object_find_next = objdb->object_find_next;
-	apidef_corosync_api_v1.object_find_destroy = objdb->object_find_destroy;
-	apidef_corosync_api_v1.object_key_get = objdb->object_key_get;
-	apidef_corosync_api_v1.object_priv_get = objdb->object_priv_get;
-	apidef_corosync_api_v1.object_key_replace = objdb->object_key_replace;
-	apidef_corosync_api_v1.object_key_delete = objdb->object_key_delete;
-	apidef_corosync_api_v1.object_iter_reset = objdb->object_iter_reset;
-	apidef_corosync_api_v1.object_iter = objdb->object_iter;
-	apidef_corosync_api_v1.object_key_iter = objdb->object_key_iter;
-	apidef_corosync_api_v1.object_parent_get = objdb->object_parent_get;
-	apidef_corosync_api_v1.object_name_get = objdb->object_name_get;
-	apidef_corosync_api_v1.object_dump = objdb->object_dump;
-	apidef_corosync_api_v1.object_key_iter_from = objdb->object_key_iter_from;
-	apidef_corosync_api_v1.object_track_start = objdb->object_track_start;
-	apidef_corosync_api_v1.object_track_stop = objdb->object_track_stop;
-	apidef_corosync_api_v1.object_write_config = objdb->object_write_config;
-	apidef_corosync_api_v1.object_reload_config = objdb->object_reload_config;
-	apidef_corosync_api_v1.object_key_increment = objdb->object_key_increment;
-	apidef_corosync_api_v1.object_key_decrement = objdb->object_key_decrement;
-	apidef_corosync_api_v1.object_key_create_typed = objdb->object_key_create_typed;
-	apidef_corosync_api_v1.object_key_get_typed = objdb->object_key_get_typed;
-	apidef_corosync_api_v1.object_key_iter_typed = objdb->object_key_iter_typed;
-}
 
 struct corosync_api_v1 *apidef_get (void)
 {

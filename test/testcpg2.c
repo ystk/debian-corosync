@@ -39,6 +39,7 @@
 #include <poll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 
 #include <corosync/corotypes.h>
 #include <corosync/cpg.h>
@@ -84,7 +85,7 @@ int main(int argc, char** argv) {
 	pfd.fd = fd;
 	pfd.events = POLLIN;
 
-	poll (&pfd, 1, 1000);
+	assert(poll (&pfd, 1, 1000) == 1);
 	cpg_dispatch(handle, CS_DISPATCH_ALL);
 	return (0);
 }

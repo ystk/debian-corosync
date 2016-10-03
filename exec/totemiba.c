@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009 Red Hat, Inc.
+ * Copyright (c) 2009-2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -70,17 +70,20 @@
 #include <corosync/list.h>
 #include <corosync/hdb.h>
 #include <corosync/swab.h>
-#include <corosync/totem/coropoll.h>
+
+#include <qb/qbdefs.h>
+#include <qb/qbloop.h>
 #define LOGSYS_UTILS_ONLY 1
-#include <corosync/engine/logsys.h>
+#include <corosync/logsys.h>
 #include "totemiba.h"
-#include "wthread.h"
 
 #define COMPLETION_QUEUE_ENTRIES 100
 
 #define TOTAL_READ_POSTS 100
 
 #define MAX_MTU_SIZE 4096
+
+#define MCAST_REJOIN_MSEC	100
 
 struct totemiba_instance {
 	struct sockaddr bind_addr;
@@ -97,6 +100,8 @@ struct totemiba_instance {
 
 	struct totem_config *totem_config;
 
+	totemsrp_stats_t *stats;
+
 	void (*totemiba_iface_change_fn) (
 		void *context,
 		const struct totem_ip_address *iface_address);
@@ -111,9 +116,9 @@ struct totemiba_instance {
 
 	void *rrp_context;
 
-	poll_timer_handle timer_netif_check_timeout;
+	qb_loop_timer_handle timer_netif_check_timeout;
 
-	hdb_handle_t totemiba_poll_handle;
+	qb_loop_t *totemiba_poll_handle;
 
 	struct totem_ip_address my_id;
 
@@ -185,13 +190,15 @@ struct totemiba_instance {
 
 	struct ibv_cq *send_token_recv_cq;
 
-	void (*totemiba_log_printf) (
-		unsigned int rec_ident,
+        void (*totemiba_log_printf) (
+		int level,
+		int subsys,
 		const char *function,
 		const char *file,
 		int line,
 		const char *format,
-		...)__attribute__((format(printf, 5, 6)));
+		...)__attribute__((format(printf, 6, 7)));
+
 
 	int totemiba_subsys_id;
 
@@ -204,20 +211,23 @@ struct totemiba_instance {
 	struct list_head token_send_buf_head;
 
 	struct list_head recv_token_recv_buf_head;
+
+	int mcast_seen_joined;
+
+	qb_loop_timer_handle mcast_rejoin;
 };
 union u {
 	uint64_t wr_id;
 	void *v;
 };
 
-#define log_printf(level, format, args...)				\
-do {									\
-        instance->totemiba_log_printf (					\
-		LOGSYS_ENCODE_RECID(level,				\
-				    instance->totemiba_subsys_id,	\
-				    LOGSYS_RECID_LOG),			\
-                __FUNCTION__, __FILE__, __LINE__,			\
-		(const char *)format, ##args);				\
+#define log_printf(level, format, args...)			\
+do {								\
+        instance->totemiba_log_printf (				\
+			level,					\
+			instance->totemiba_subsys_id,		\
+			__FUNCTION__, __FILE__, __LINE__,	\
+			(const char *)format, ##args);		\
 } while (0);
 
 struct recv_buf {
@@ -225,7 +235,7 @@ struct recv_buf {
 	struct ibv_recv_wr recv_wr;
 	struct ibv_sge sge;
 	struct ibv_mr *mr;
-	char buffer[MAX_MTU_SIZE];
+	char buffer[MAX_MTU_SIZE + sizeof (struct ibv_grh)];
 };
 
 struct send_buf {
@@ -268,9 +278,10 @@ static inline struct send_buf *mcast_send_buf_get (
 	}
 	send_buf->mr = ibv_reg_mr (instance->mcast_pd,
 		send_buf->buffer,
-		2048, IBV_ACCESS_LOCAL_WRITE);
+		MAX_MTU_SIZE, IBV_ACCESS_LOCAL_WRITE);
 	if (send_buf->mr == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't register memory range\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't register memory range");
+		free (send_buf);
 		return (NULL);
 	}
 	list_init (&send_buf->list_all);
@@ -304,9 +315,10 @@ static inline struct send_buf *token_send_buf_get (
 	}
 	send_buf->mr = ibv_reg_mr (instance->send_token_pd,
 		send_buf->buffer,
-		2048, IBV_ACCESS_LOCAL_WRITE);
+		MAX_MTU_SIZE, IBV_ACCESS_LOCAL_WRITE);
 	if (send_buf->mr == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't register memory range\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't register memory range");
+		free (send_buf);
 		return (NULL);
 	}
 	list_init (&send_buf->list_all);
@@ -350,7 +362,7 @@ static inline struct recv_buf *recv_token_recv_buf_create (
 	}
 
 	recv_buf->mr = ibv_reg_mr (instance->recv_token_pd, &recv_buf->buffer,
-		2048,
+		MAX_MTU_SIZE + sizeof (struct ibv_grh),
 		IBV_ACCESS_LOCAL_WRITE);
 
 	recv_buf->recv_wr.next = NULL;
@@ -358,7 +370,7 @@ static inline struct recv_buf *recv_token_recv_buf_create (
 	recv_buf->recv_wr.num_sge = 1;
 	recv_buf->recv_wr.wr_id = (uintptr_t)recv_buf;
 
-	recv_buf->sge.length = 2048;
+	recv_buf->sge.length = MAX_MTU_SIZE + sizeof (struct ibv_grh);
 	recv_buf->sge.lkey = recv_buf->mr->lkey;
 	recv_buf->sge.addr = (uintptr_t)recv_buf->buffer;
 
@@ -417,7 +429,7 @@ static inline struct recv_buf *mcast_recv_buf_create (struct totemiba_instance *
 	}
 
 	mr = ibv_reg_mr (instance->mcast_pd, &recv_buf->buffer,
-		2048,
+		MAX_MTU_SIZE + sizeof (struct ibv_grh),
 		IBV_ACCESS_LOCAL_WRITE);
 
 	recv_buf->recv_wr.next = NULL;
@@ -425,7 +437,7 @@ static inline struct recv_buf *mcast_recv_buf_create (struct totemiba_instance *
 	recv_buf->recv_wr.num_sge = 1;
 	recv_buf->recv_wr.wr_id = (uintptr_t)recv_buf;
 
-	recv_buf->sge.length = 2048;
+	recv_buf->sge.length = MAX_MTU_SIZE + sizeof (struct ibv_grh);
 	recv_buf->sge.lkey = mr->lkey;
 	recv_buf->sge.addr = (uintptr_t)recv_buf->buffer;
 
@@ -462,10 +474,11 @@ static inline void iba_deliver_fn (struct totemiba_instance *instance, uint64_t 
 	recv_buf = wrid2void(wr_id);
 	addr = &recv_buf->buffer[sizeof (struct ibv_grh)];
 
+	bytes -= sizeof (struct ibv_grh);
 	instance->totemiba_deliver_fn (instance->rrp_context, addr, bytes);
 }
 
-static int mcast_cq_send_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static int mcast_cq_send_event_fn (int fd, int events, void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct ibv_wc wc[32];
@@ -488,7 +501,7 @@ static int mcast_cq_send_event_fn (hdb_handle_t poll_handle,  int events,  int s
 	return (0);
 }
 
-static int mcast_cq_recv_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static int mcast_cq_recv_event_fn (int fd, int events, void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct ibv_wc wc[64];
@@ -512,7 +525,33 @@ static int mcast_cq_recv_event_fn (hdb_handle_t poll_handle,  int events,  int s
 	return (0);
 }
 
-static int mcast_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static void mcast_rejoin (void *data)
+{
+	int res;
+	struct totemiba_instance *instance = (struct totemiba_instance *)data;
+
+	res = rdma_leave_multicast (instance->mcast_cma_id, &instance->mcast_addr);
+	if (instance->mcast_ah) {
+		ibv_destroy_ah (instance->mcast_ah);
+		instance->mcast_ah = 0;
+	}
+
+	res = rdma_join_multicast (instance->mcast_cma_id, &instance->mcast_addr, instance);
+	if (res != 0) {
+		log_printf (LOGSYS_LEVEL_DEBUG,
+		    "rdma_join_multicast failed, errno=%d, rejoining in %u ms",
+		    errno,
+		    MCAST_REJOIN_MSEC);
+		qb_loop_timer_add (instance->totemiba_poll_handle,
+			QB_LOOP_MED,
+			MCAST_REJOIN_MSEC * QB_TIME_NS_IN_MSEC,
+			(void *)instance,
+			mcast_rejoin,
+			&instance->mcast_rejoin);
+	}
+}
+
+static int mcast_rdma_event_fn (int fd, int events, void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct rdma_cm_event *event;
@@ -529,7 +568,17 @@ static int mcast_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int suck
 	 * occurs when we resolve the multicast address
 	 */
 	case RDMA_CM_EVENT_ADDR_RESOLVED:
-		rdma_join_multicast (instance->mcast_cma_id, &instance->mcast_addr, instance);
+		res = rdma_join_multicast (instance->mcast_cma_id, &instance->mcast_addr, instance);
+		usleep(1000);
+		if (res == 0) break;
+	case RDMA_CM_EVENT_MULTICAST_ERROR:
+		log_printf (LOGSYS_LEVEL_ERROR, "multicast error, trying to rejoin in %u ms", MCAST_REJOIN_MSEC);
+		qb_loop_timer_add (instance->totemiba_poll_handle,
+			QB_LOOP_MED,
+			MCAST_REJOIN_MSEC * QB_TIME_NS_IN_MSEC,
+			(void *)instance,
+			mcast_rejoin,
+			&instance->mcast_rejoin);
 		break;
 	/*
 	 * occurs when the CM joins the multicast group
@@ -539,17 +588,19 @@ static int mcast_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int suck
 		instance->mcast_qkey = event->param.ud.qkey;
 		instance->mcast_ah = ibv_create_ah (instance->mcast_pd, &event->param.ud.ah_attr);
 
-		instance->totemiba_iface_change_fn (instance->rrp_context, &instance->my_id);
+		if (instance->mcast_seen_joined == 0) {
+			log_printf (LOGSYS_LEVEL_DEBUG, "joining mcast 1st time, running callbacks");
+			instance->totemiba_iface_change_fn (instance->rrp_context, &instance->my_id);
+			instance->mcast_seen_joined=1;
+		}
+		log_printf (LOGSYS_LEVEL_NOTICE, "Joined multicast!");
 		break;
 	case RDMA_CM_EVENT_ADDR_ERROR:
 	case RDMA_CM_EVENT_ROUTE_ERROR:
-	case RDMA_CM_EVENT_MULTICAST_ERROR:
-		log_printf (LOGSYS_LEVEL_ERROR, "multicast error\n");
-		break;
 	case RDMA_CM_EVENT_DEVICE_REMOVAL:
 		break;
 	default:
-		log_printf (LOGSYS_LEVEL_ERROR, "default %d\n", event->event);
+		log_printf (LOGSYS_LEVEL_ERROR, "default %d", event->event);
 		break;
 	}
 
@@ -557,7 +608,10 @@ static int mcast_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int suck
 	return (0);
 }
 
-static int recv_token_cq_send_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static int recv_token_cq_send_event_fn (
+	int fd,
+	int revents,
+	void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct ibv_wc wc[32];
@@ -581,7 +635,7 @@ static int recv_token_cq_send_event_fn (hdb_handle_t poll_handle,  int events,  
 	return (0);
 }
 
-static int recv_token_cq_recv_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static int recv_token_cq_recv_event_fn (int fd, int events, void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct ibv_wc wc[32];
@@ -611,6 +665,14 @@ static int recv_token_accept_destroy (struct totemiba_instance *instance)
 		return (0);
 	}
 
+	qb_loop_poll_del (
+		instance->totemiba_poll_handle,
+		instance->recv_token_recv_completion_channel->fd);
+
+	qb_loop_poll_del (
+		instance->totemiba_poll_handle,
+		instance->recv_token_send_completion_channel->fd);
+
 	rdma_destroy_qp (instance->recv_token_cma_id);
 
 	recv_token_recv_buf_post_destroy (instance);
@@ -626,14 +688,6 @@ static int recv_token_accept_destroy (struct totemiba_instance *instance)
 	ibv_dealloc_pd (instance->recv_token_pd);
 
 	rdma_destroy_id (instance->recv_token_cma_id);
-
-	poll_dispatch_delete (
-		instance->totemiba_poll_handle,
-		instance->recv_token_recv_completion_channel->fd);
-
-	poll_dispatch_delete (
-		instance->totemiba_poll_handle,
-		instance->recv_token_send_completion_channel->fd);
 
 	return (0);
 }
@@ -653,7 +707,7 @@ static int recv_token_accept_setup (struct totemiba_instance *instance)
 	 */
 	instance->recv_token_recv_completion_channel = ibv_create_comp_channel (instance->recv_token_cma_id->verbs);
 	if (instance->recv_token_recv_completion_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel");
 		return (-1);
 	}
 
@@ -664,12 +718,12 @@ static int recv_token_accept_setup (struct totemiba_instance *instance)
 		COMPLETION_QUEUE_ENTRIES, instance,
 		instance->recv_token_recv_completion_channel, 0);
 	if (instance->recv_token_recv_cq == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue");
 		return (-1);
 	}
 	res = ibv_req_notify_cq (instance->recv_token_recv_cq, 0);
 	if (res != 0) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't request notifications of the completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't request notifications of the completion queue");
 		return (-1);
 	}
 
@@ -678,7 +732,7 @@ static int recv_token_accept_setup (struct totemiba_instance *instance)
 	 */
 	instance->recv_token_send_completion_channel = ibv_create_comp_channel (instance->recv_token_cma_id->verbs);
 	if (instance->recv_token_send_completion_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel");
 		return (-1);
 	}
 
@@ -689,12 +743,12 @@ static int recv_token_accept_setup (struct totemiba_instance *instance)
 		COMPLETION_QUEUE_ENTRIES, instance,
 		instance->recv_token_send_completion_channel, 0);
 	if (instance->recv_token_send_cq == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue");
 		return (-1);
 	}
 	res = ibv_req_notify_cq (instance->recv_token_send_cq, 0);
 	if (res != 0) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't request notifications of the completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't request notifications of the completion queue");
 		return (-1);
 	}
 	memset (&init_qp_attr, 0, sizeof (struct ibv_qp_init_attr));
@@ -710,19 +764,21 @@ static int recv_token_accept_setup (struct totemiba_instance *instance)
 	res = rdma_create_qp (instance->recv_token_cma_id, instance->recv_token_pd,
 		&init_qp_attr);
 	if (res != 0) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create queue pair\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create queue pair");
 		return (-1);
 	}
 	
 	recv_token_recv_buf_post_initial (instance);
 
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->recv_token_recv_completion_channel->fd,
 		POLLIN, instance, recv_token_cq_recv_event_fn);
 
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->recv_token_send_completion_channel->fd,
 		POLLIN, instance, recv_token_cq_send_event_fn);
 
@@ -731,7 +787,7 @@ static int recv_token_accept_setup (struct totemiba_instance *instance)
 	return (res);
 };
 
-static int recv_token_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static int recv_token_rdma_event_fn (int fd, int events, void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct rdma_cm_event *event;
@@ -755,7 +811,7 @@ static int recv_token_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int
 		res = rdma_accept (instance->recv_token_cma_id, &conn_param);
 		break;
 	default:
-		log_printf (LOGSYS_LEVEL_ERROR, "default %d\n", event->event);
+		log_printf (LOGSYS_LEVEL_ERROR, "default %d", event->event);
 		break;
 	}
 
@@ -763,7 +819,7 @@ static int recv_token_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int
 	return (0);
 }
 
-static int send_token_cq_send_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static int send_token_cq_send_event_fn (int fd, int events, void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct ibv_wc wc[32];
@@ -786,7 +842,7 @@ static int send_token_cq_send_event_fn (hdb_handle_t poll_handle,  int events,  
 	return (0);
 }
 
-static int send_token_cq_recv_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static int send_token_cq_recv_event_fn (int fd, int events, void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct ibv_wc wc[32];
@@ -809,7 +865,7 @@ static int send_token_cq_recv_event_fn (hdb_handle_t poll_handle,  int events,  
 	return (0);
 }
 
-static int send_token_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int suck,  void *context)
+static int send_token_rdma_event_fn (int fd, int events, void *context)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)context;
 	struct rdma_cm_event *event;
@@ -849,17 +905,17 @@ static int send_token_rdma_event_fn (hdb_handle_t poll_handle,  int events,  int
 	case RDMA_CM_EVENT_ROUTE_ERROR:
 	case RDMA_CM_EVENT_MULTICAST_ERROR:
 		log_printf (LOGSYS_LEVEL_ERROR,
-			"send_token_rdma_event_fn multicast error\n");
+			"send_token_rdma_event_fn multicast error");
 		break;
 	case RDMA_CM_EVENT_DEVICE_REMOVAL:
 		break;
 	case RDMA_CM_EVENT_UNREACHABLE:
 		log_printf (LOGSYS_LEVEL_ERROR,
-			"send_token_rdma_event_fn unreachable\n");
+			"send_token_rdma_event_fn unreachable");
 		break;
 	default:
 		log_printf (LOGSYS_LEVEL_ERROR,
-			"send_token_rdma_event_fn unknown event %d\n",
+			"send_token_rdma_event_fn unknown event %d",
 			event->event);
 		break;
 	}
@@ -875,21 +931,21 @@ static int send_token_bind (struct totemiba_instance *instance)
 
 	instance->send_token_channel = rdma_create_event_channel();
 	if (instance->send_token_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create rdma channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create rdma channel");
 		return (-1);
 	}
 
 	res = rdma_create_id (instance->send_token_channel,
 		&instance->send_token_cma_id, NULL, RDMA_PS_UDP);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error creating send_token_cma_id\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "error creating send_token_cma_id");
 		return (-1);
 	}
 
 	res = rdma_bind_addr (instance->send_token_cma_id,
 		&instance->send_token_bind_addr);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error doing rdma_bind_addr for send token\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "error doing rdma_bind_addr for send token");
 		return (-1);
 	}
 
@@ -899,7 +955,7 @@ static int send_token_bind (struct totemiba_instance *instance)
 	res = rdma_resolve_addr (instance->send_token_cma_id,
 		&instance->bind_addr, &instance->token_addr, 2000);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error resolving send token address %d %d\n", res, errno);
+		log_printf (LOGSYS_LEVEL_ERROR, "error resolving send token address %d %d", res, errno);
 		return (-1);
 	}
 
@@ -913,7 +969,7 @@ static int send_token_bind (struct totemiba_instance *instance)
 	 */
 	instance->send_token_recv_completion_channel = ibv_create_comp_channel (instance->send_token_cma_id->verbs);
 	if (instance->send_token_recv_completion_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel");
 		return (-1);
 	}
 
@@ -924,13 +980,13 @@ static int send_token_bind (struct totemiba_instance *instance)
 		COMPLETION_QUEUE_ENTRIES, instance,
 		instance->send_token_recv_completion_channel, 0);
 	if (instance->send_token_recv_cq == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue");
 		return (-1);
 	}
 	res = ibv_req_notify_cq (instance->send_token_recv_cq, 0);
 	if (res != 0) {
 		log_printf (LOGSYS_LEVEL_ERROR,
-			"couldn't request notifications of the completion queue\n");
+			"couldn't request notifications of the completion queue");
 		return (-1);
 	}
 
@@ -941,7 +997,7 @@ static int send_token_bind (struct totemiba_instance *instance)
 		ibv_create_comp_channel (instance->send_token_cma_id->verbs);
 
 	if (instance->send_token_send_completion_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel");
 		return (-1);
 	}
 	
@@ -953,14 +1009,14 @@ static int send_token_bind (struct totemiba_instance *instance)
 		COMPLETION_QUEUE_ENTRIES, instance,
 		instance->send_token_send_completion_channel, 0);
 	if (instance->send_token_send_cq == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue");
 		return (-1);
 	}
 
 	res = ibv_req_notify_cq (instance->send_token_send_cq, 0);
 	if (res != 0) {
 		log_printf (LOGSYS_LEVEL_ERROR,
-			"couldn't request notifications of the completion queue\n");
+			"couldn't request notifications of the completion queue");
 		return (-1);
 	}
 	memset (&init_qp_attr, 0, sizeof (struct ibv_qp_init_attr));
@@ -976,22 +1032,25 @@ static int send_token_bind (struct totemiba_instance *instance)
 	res = rdma_create_qp (instance->send_token_cma_id,
 		instance->send_token_pd, &init_qp_attr);
 	if (res != 0) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create queue pair\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create queue pair");
 		return (-1);
 	}
 	
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->send_token_recv_completion_channel->fd,
 		POLLIN, instance, send_token_cq_recv_event_fn);
 
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->send_token_send_completion_channel->fd,
 		POLLIN, instance, send_token_cq_send_event_fn);
 
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->send_token_channel->fd,
 		POLLIN, instance, send_token_rdma_event_fn);
 
@@ -1005,15 +1064,21 @@ static int send_token_unbind (struct totemiba_instance *instance)
 		return (0);
 	}
 
-	poll_dispatch_delete (
+	qb_loop_poll_del (
 		instance->totemiba_poll_handle,
 		instance->send_token_recv_completion_channel->fd);
-	poll_dispatch_delete (
+	qb_loop_poll_del (
 		instance->totemiba_poll_handle,
 		instance->send_token_send_completion_channel->fd);
-	poll_dispatch_delete (
+	qb_loop_poll_del (
 		instance->totemiba_poll_handle,
 		instance->send_token_channel->fd);
+
+	if(instance->send_token_ah)
+	{
+		ibv_destroy_ah(instance->send_token_ah);
+		instance->send_token_ah = 0;
+	}
 
 	rdma_destroy_qp (instance->send_token_cma_id);
 	ibv_destroy_cq (instance->send_token_send_cq);
@@ -1030,24 +1095,39 @@ static int send_token_unbind (struct totemiba_instance *instance)
 static int recv_token_bind (struct totemiba_instance *instance)
 {
 	int res;
+	struct ibv_port_attr port_attr;
 
 	instance->listen_recv_token_channel = rdma_create_event_channel();
 	if (instance->listen_recv_token_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create rdma channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create rdma channel");
 		return (-1);
 	}
 
 	res = rdma_create_id (instance->listen_recv_token_channel,
 		&instance->listen_recv_token_cma_id, NULL, RDMA_PS_UDP);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error creating recv_token_cma_id\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "error creating recv_token_cma_id");
 		return (-1);
 	}
 
 	res = rdma_bind_addr (instance->listen_recv_token_cma_id,
 		&instance->bind_addr);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error doing rdma_bind_addr for recv token\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "error doing rdma_bind_addr for recv token");
+		return (-1);
+	}
+
+	/*
+	 * Determine active_mtu of port and compare it with the configured one (160 is aproximation of all totem
+	 * structures.
+	 *
+	 * TODO: Implement MTU discovery also for IP and handle MTU correctly for all structures inside totemsrp,
+	 *       crypto, ...
+	 */
+	res = ibv_query_port (instance->listen_recv_token_cma_id->verbs, instance->listen_recv_token_cma_id->port_num, &port_attr);
+	if ( (1 << (port_attr.active_mtu + 7)) < instance->totem_config->net_mtu + 160) {
+		log_printf (LOGSYS_LEVEL_ERROR, "requested net_mtu is %d and is larger than the active port mtu %d\n",\
+				instance->totem_config->net_mtu + 160, (1 << (port_attr.active_mtu + 7)));
 		return (-1);
 	}
 
@@ -1056,12 +1136,13 @@ static int recv_token_bind (struct totemiba_instance *instance)
 	 */
 	res = rdma_listen (instance->listen_recv_token_cma_id, 10);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error listening %d %d\n", res, errno);
+		log_printf (LOGSYS_LEVEL_ERROR, "error listening %d %d", res, errno);
 		return (-1);
 	}
 
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->listen_recv_token_channel->fd,
 		POLLIN, instance, recv_token_rdma_event_fn);
 
@@ -1075,19 +1156,19 @@ static int mcast_bind (struct totemiba_instance *instance)
 
 	instance->mcast_channel = rdma_create_event_channel();
 	if (instance->mcast_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create rdma channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create rdma channel");
 		return (-1);
 	}
 
 	res = rdma_create_id (instance->mcast_channel, &instance->mcast_cma_id, NULL, RDMA_PS_UDP);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error creating mcast_cma_id\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "error creating mcast_cma_id");
 		return (-1);
 	}
 
 	res = rdma_bind_addr (instance->mcast_cma_id, &instance->local_mcast_bind_addr);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error doing rdma_bind_addr for mcast\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "error doing rdma_bind_addr for mcast");
 		return (-1);
 	}
 
@@ -1097,7 +1178,7 @@ static int mcast_bind (struct totemiba_instance *instance)
 	res = rdma_resolve_addr (instance->mcast_cma_id, &instance->local_mcast_bind_addr,
 		&instance->mcast_addr, 5000);
 	if (res) {
-		log_printf (LOGSYS_LEVEL_ERROR, "error resolving multicast address %d %d\n", res, errno);
+		log_printf (LOGSYS_LEVEL_ERROR, "error resolving multicast address %d %d", res, errno);
 		return (-1);
 	}
 
@@ -1111,7 +1192,7 @@ static int mcast_bind (struct totemiba_instance *instance)
 	 */
 	instance->mcast_recv_completion_channel = ibv_create_comp_channel (instance->mcast_cma_id->verbs);
 	if (instance->mcast_recv_completion_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel");
 		return (-1);
 	}
 
@@ -1122,12 +1203,12 @@ static int mcast_bind (struct totemiba_instance *instance)
 		COMPLETION_QUEUE_ENTRIES, instance,
 		instance->mcast_recv_completion_channel, 0);
 	if (instance->mcast_recv_cq == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue");
 		return (-1);
 	}
 	res = ibv_req_notify_cq (instance->mcast_recv_cq, 0);
 	if (res != 0) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't request notifications of the completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't request notifications of the completion queue");
 		return (-1);
 	}
 
@@ -1136,7 +1217,7 @@ static int mcast_bind (struct totemiba_instance *instance)
 	 */
 	instance->mcast_send_completion_channel = ibv_create_comp_channel (instance->mcast_cma_id->verbs);
 	if (instance->mcast_send_completion_channel == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion channel");
 		return (-1);
 	}
 
@@ -1147,12 +1228,12 @@ static int mcast_bind (struct totemiba_instance *instance)
 		COMPLETION_QUEUE_ENTRIES, instance,
 		instance->mcast_send_completion_channel, 0);
 	if (instance->mcast_send_cq == NULL) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create completion queue");
 		return (-1);
 	}
 	res = ibv_req_notify_cq (instance->mcast_send_cq, 0);
 	if (res != 0) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't request notifications of the completion queue\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't request notifications of the completion queue");
 		return (-1);
 	}
 	memset (&init_qp_attr, 0, sizeof (struct ibv_qp_init_attr));
@@ -1168,29 +1249,33 @@ static int mcast_bind (struct totemiba_instance *instance)
 	res = rdma_create_qp (instance->mcast_cma_id, instance->mcast_pd,
 		&init_qp_attr);
 	if (res != 0) {
-		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create queue pair\n");
+		log_printf (LOGSYS_LEVEL_ERROR, "couldn't create queue pair");
 		return (-1);
 	}
 	
 	mcast_recv_buf_post_initial (instance);
 
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->mcast_recv_completion_channel->fd,
 		POLLIN, instance, mcast_cq_recv_event_fn);
 
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->mcast_send_completion_channel->fd,
 		POLLIN, instance, mcast_cq_send_event_fn);
 
-	poll_dispatch_add (
+	qb_loop_poll_add (
 		instance->totemiba_poll_handle,
+		QB_LOOP_MED,
 		instance->mcast_channel->fd,
 		POLLIN, instance, mcast_rdma_event_fn);
 
 	return (0);
 }
+
 static void timer_function_netif_check_timeout (
       void *data)
 {
@@ -1237,7 +1322,8 @@ static void timer_function_netif_check_timeout (
 
 int totemiba_crypto_set (
 	void *iba_context,
-	unsigned int type)
+	const char *cipher_type,
+	const char *hash_type)
 {
 	struct totemiba_instance *instance = (struct totemiba_instance *)iba_context;
 	int res = 0;
@@ -1262,9 +1348,10 @@ int totemiba_finalize (
  * Create an instance
  */
 int totemiba_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t *qb_poll_handle,
 	void **iba_context,
 	struct totem_config *totem_config,
+	totemsrp_stats_t *stats,
 	int interface_no,
 	void *context,
 
@@ -1292,7 +1379,9 @@ int totemiba_initialize (
 
 	instance->totem_interface = &totem_config->interfaces[interface_no];
 
-	instance->totemiba_poll_handle = poll_handle;
+	instance->totemiba_poll_handle = qb_poll_handle;
+
+	instance->totem_interface->bindnet.nodeid = totem_config->node_id;
 
 	instance->totemiba_deliver_fn = deliver_fn;
 
@@ -1301,11 +1390,13 @@ int totemiba_initialize (
 	instance->totemiba_iface_change_fn = iface_change_fn;
 
 	instance->totem_config = totem_config;
+	instance->stats = stats;
 
 	instance->rrp_context = context;
 
-	poll_timer_add (instance->totemiba_poll_handle,
-		100,
+	qb_loop_timer_add (instance->totemiba_poll_handle,
+		QB_LOOP_MED,
+		100*QB_TIME_NS_IN_MSEC,
 		(void *)instance,
 		timer_function_netif_check_timeout,
 		&instance->timer_netif_check_timeout);
@@ -1315,6 +1406,16 @@ int totemiba_initialize (
 
 	*iba_context = instance;
 	return (res);
+}
+
+void *totemiba_buffer_alloc (void)
+{
+	return malloc (MAX_MTU_SIZE);
+}
+
+void totemiba_buffer_release (void *ptr)
+{
+	return free (ptr);
 }
 
 int totemiba_processor_count_set (
@@ -1383,7 +1484,8 @@ int totemiba_token_send (
 	sge.lkey = send_buf->mr->lkey;
 	sge.addr = (uintptr_t)msg;
 
-	res = ibv_post_send (instance->send_token_cma_id->qp, &send_wr, &failed_send_wr);
+	if(instance->send_token_ah != 0 && instance->send_token_bound)
+		res = ibv_post_send (instance->send_token_cma_id->qp, &send_wr, &failed_send_wr);
 
 	return (res);
 }
@@ -1422,7 +1524,10 @@ int totemiba_mcast_flush_send (
 	sge.lkey = send_buf->mr->lkey;
 	sge.addr = (uintptr_t)msg;
 
-	res = ibv_post_send (instance->mcast_cma_id->qp, &send_wr, &failed_send_wr);
+	if (instance->mcast_ah != 0) {
+		res = ibv_post_send (instance->mcast_cma_id->qp, &send_wr, &failed_send_wr);
+	}
+
 	return (res);
 }
 
@@ -1460,7 +1565,10 @@ int totemiba_mcast_noflush_send (
 	sge.lkey = send_buf->mr->lkey;
 	sge.addr = (uintptr_t)msg;
 
-	res = ibv_post_send (instance->mcast_cma_id->qp, &send_wr, &failed_send_wr);
+	if (instance->mcast_ah != 0) {
+		res = ibv_post_send (instance->mcast_cma_id->qp, &send_wr, &failed_send_wr);
+	}
+
 	return (res);
 }
 

@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2002-2004 MontaVista Software, Inc.
  * Copyright (c) 2004 Open Source Development Lab
+ * Copyright (c) 2006-2011 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -38,41 +39,50 @@
 #include <sys/time.h>
 #include <corosync/corotypes.h>
 
-/*
+/**
  * Get the time of day and convert to nanoseconds
  */
 extern cs_time_t clust_time_now(void);
 
-enum e_ais_done {
-	AIS_DONE_EXIT = -1,
-	AIS_DONE_UID_DETERMINE = -2,
-	AIS_DONE_GID_DETERMINE = -3,
-	AIS_DONE_MEMPOOL_INIT = -4,
-	AIS_DONE_FORK = -5,
-	AIS_DONE_LIBAIS_SOCKET = -6,
-	AIS_DONE_LIBAIS_BIND = -7,
-	AIS_DONE_READKEY = -8,
-	AIS_DONE_MAINCONFIGREAD = -9,
-	AIS_DONE_LOGSETUP = -10,
-	AIS_DONE_AMFCONFIGREAD = -11,
-	AIS_DONE_DYNAMICLOAD = -12,
-	AIS_DONE_OBJDB = -13,
-	AIS_DONE_INIT_SERVICES = -14,
-	AIS_DONE_OUT_OF_MEMORY = -15,
-	AIS_DONE_FATAL_ERR = -16,
-	AIS_DONE_DIR_NOT_PRESENT = -17
+enum e_corosync_done {
+	COROSYNC_DONE_EXIT = 0,
+	COROSYNC_DONE_FORK = 4,
+	COROSYNC_DONE_LOGCONFIGREAD = 7,
+	COROSYNC_DONE_MAINCONFIGREAD = 8,
+	COROSYNC_DONE_LOGSETUP = 9,
+	COROSYNC_DONE_ICMAP = 12,
+	COROSYNC_DONE_INIT_SERVICES = 13,
+	COROSYNC_DONE_FATAL_ERR = 15,
+	COROSYNC_DONE_DIR_NOT_PRESENT = 16,
+	COROSYNC_DONE_AQUIRE_LOCK = 17,
+	COROSYNC_DONE_ALREADY_RUNNING = 18,
+	COROSYNC_DONE_STD_TO_NULL_REDIR = 19,
+	COROSYNC_DONE_SERVICE_ENGINE_INIT = 20,
+	COROSYNC_DONE_STORE_RINGID = 21,
+	COROSYNC_DONE_PLOAD = 99
 };
 
-/*
+
+/**
  * Compare two names.  returns non-zero on match.
  */
 extern int name_match(cs_name_t *name1, cs_name_t *name2);
 #define corosync_exit_error(err) _corosync_exit_error ((err), __FILE__, __LINE__)
-extern void _corosync_exit_error (enum e_ais_done err, const char *file,
-				  unsigned int line)
-  __attribute__((__noreturn__));
-void _corosync_out_of_memory_error (void) __attribute__((__noreturn__));
+extern void _corosync_exit_error (enum e_corosync_done err, const char *file,
+				  unsigned int line) __attribute__((noreturn));
+void _corosync_out_of_memory_error (void) __attribute__((noreturn));
 extern char *getcs_name_t (cs_name_t *name);
 extern void setcs_name_t (cs_name_t *name, char *str);
 extern int cs_name_tisEqual (cs_name_t *str1, char *str2);
+/**
+ * Get the short name of a service from the service_id.
+ */
+const char * short_service_name_get(uint32_t service_id,
+				    char *buf, size_t buf_size);
+
+/*
+ * Return run directory (ether COROSYNC_RUN_DIR env or LOCALSTATEDIR/lib/corosync)
+ */
+const char *get_run_dir(void);
+
 #endif /* UTIL_H_DEFINED */

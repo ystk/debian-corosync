@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2009 Red Hat, Inc.
+ * Copyright (c) 2006-2013 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -40,90 +40,51 @@
 
 typedef uint64_t corosync_cfg_handle_t;
 
+/**
+ * Shutdown types.
+ */
 typedef enum {
-	COROSYNC_CFG_ADMINISTRATIVETARGET_SERVICEUNIT = 0,
-	COROSYNC_CFG_ADMINISTRATIVETARGET_SERVICEGROUP = 1,
-	COROSYNC_CFG_ADMINISTRATIVETARGET_COMPONENTSERVICEINSTANCE = 2,
-	COROSYNC_CFG_ADMINISTRATIVETARGET_NODE = 3
-} corosync_cfg_administrative_target_t;
-
-typedef enum {
-	COROSYNC_CFG_ADMINISTRATIVESTATE_UNLOCKED = 0,
-	COROSYNC_CFG_ADMINISTRATIVESTATE_LOCKED = 1,
-	COROSYNC_CFG_ADMINISTRATIVESTATE_STOPPING = 2
-} corosync_cfg_administrative_state_t;
-
-typedef enum {
-	COROSYNC_CFG_OPERATIONALSTATE_ENABLED = 1,
-	COROSYNC_CFG_OPERATIONALSTATE_DISABLED = 2
-} corosync_cfg_operational_state_t;
-
-typedef enum {
-	COROSYNC_CFG_READINESSSTATE_OUTOFSERVICE = 1,
-	COROSYNC_CFG_READINESSSTATE_INSERVICE = 2,
-	COROSYNC_CFG_READINESSSTATE_STOPPING = 3
-} corosync_cfg_readiness_state_t;
-
-typedef enum {
-	COROSYNC_CFG_PRESENCESTATE_UNINSTANTIATED = 1,
-	COROSYNC_CFG_PRESENCESTATE_INSTANTIATING = 2,
-	COROSYNC_CFG_PRESENCESTATE_INSTANTIATED = 3,
-	COROSYNC_CFG_PRESENCESTATE_TERMINATING = 4,
-	COROSYNC_CFG_PRESENCESTATE_RESTARTING = 5,
-	COROSYNC_CFG_PRESENCESTATE_INSTANTIATION_FAILED = 6,
-	COROSYNC_CFG_PRESENCESTATE_TERMINATION_FAILED = 7
-} corosync_cfg_presence_state_t;
-
-typedef enum {
-	COROSYNC_CFG_STATETYPE_OPERATIONAL = 0,
-	COROSYNC_CFG_STATETYPE_ADMINISTRATIVE = 1,
-	COROSYNC_CFG_STATETYPE_READINESS = 2,
-	COROSYNC_CFG_STATETYPE_HA = 3,
-	COROSYNC_CFG_STATETYPE_PRESENCE = 4
-} corosync_cfg_state_type_t;
-
-/* Shutdown types.
-   REQUEST is the normal shutdown. other daemons will be consulted
-   REGARDLESS will tell other daemons but ignore their opinions
-   IMMEDIATE will shut down straight away (but still tell other nodes)
-*/
-typedef enum {
+	/**
+	 * REQUEST is the normal shutdown.
+	 *        Other daemons will be consulted.
+	 */
 	COROSYNC_CFG_SHUTDOWN_FLAG_REQUEST = 0,
+	/**
+	 * REGARDLESS will tell other daemons but ignore their opinions.
+	 */
 	COROSYNC_CFG_SHUTDOWN_FLAG_REGARDLESS = 1,
+	/**
+	 * IMMEDIATE will shut down straight away
+	 *        (but still tell other nodes).
+	 */
 	COROSYNC_CFG_SHUTDOWN_FLAG_IMMEDIATE = 2,
 } corosync_cfg_shutdown_flags_t;
 
+/**
+ * @brief enum corosync_cfg_shutdown_reply_flags_t
+ */
 typedef enum {
 	COROSYNC_CFG_SHUTDOWN_FLAG_NO = 0,
 	COROSYNC_CFG_SHUTDOWN_FLAG_YES = 1,
 } corosync_cfg_shutdown_reply_flags_t;
 
-typedef struct {
-	cs_name_t name;
-	corosync_cfg_state_type_t state_type;
-	corosync_cfg_administrative_state_t administrative_state;
-} corosync_cfg_state_notification_t;
-
-typedef struct {
-        uint32_t number_of_items;
-        corosync_cfg_state_notification_t *notification;
-} corosync_cfg_state_notification_buffer_t;
-
-typedef void (*corosync_cfg_state_track_callback_t) (
-	corosync_cfg_state_notification_buffer_t *notification_buffer,
-	cs_error_t error);
-
+/**
+ * @brief corosync_cfg_shutdown_callback_t callback
+ */
 typedef void (*corosync_cfg_shutdown_callback_t) (
 	corosync_cfg_handle_t cfg_handle,
 	corosync_cfg_shutdown_flags_t flags);
 
+/**
+ * @brief struct corosync_cfg_shutdown_callback_t
+ */
 typedef struct {
-	corosync_cfg_state_track_callback_t corosync_cfg_state_track_callback;
 	corosync_cfg_shutdown_callback_t corosync_cfg_shutdown_callback;
 } corosync_cfg_callbacks_t;
 
-/*
+/**
  * A node address. This is a complete sockaddr_in[6]
+ *
  * To explain:
  *  If you cast cna_address to a 'struct sockaddr', the sa_family field
  *  will be AF_INET or AF_INET6. Armed with that knowledge you can then
@@ -133,10 +94,9 @@ typedef struct {
  */
 typedef struct
 {
-	int address_length; /* FIXME: set but never used */
+	int address_length; /**< @todo FIXME: set but never used */
 	char address[sizeof(struct sockaddr_in6)];
 } corosync_cfg_node_address_t;
-
 
 /*
  * Interfaces
@@ -145,25 +105,56 @@ typedef struct
 extern "C" {
 #endif
 
+/**
+ * @brief corosync_cfg_initialize
+ * @param cfg_handle
+ * @param cfg_callbacks
+ * @return
+ */
 cs_error_t
 corosync_cfg_initialize (
 	corosync_cfg_handle_t *cfg_handle,
 	const corosync_cfg_callbacks_t *cfg_callbacks);
 
+/**
+ * @brief corosync_cfg_fd_get
+ * @param cfg_handle
+ * @param selection_fd
+ * @return
+ */
 cs_error_t
 corosync_cfg_fd_get (
 	corosync_cfg_handle_t cfg_handle,
 	int32_t *selection_fd);
 
+/**
+ * @brief corosync_cfg_dispatch
+ * @param cfg_handle
+ * @param dispatch_flags
+ * @return
+ */
 cs_error_t
 corosync_cfg_dispatch (
 	corosync_cfg_handle_t cfg_handle,
 	cs_dispatch_flags_t dispatch_flags);
 
+/**
+ * @brief corosync_cfg_finalize
+ * @param cfg_handle
+ * @return
+ */
 cs_error_t
 corosync_cfg_finalize (
 	corosync_cfg_handle_t cfg_handle);
 
+/**
+ * @brief corosync_cfg_ring_status_get
+ * @param cfg_handle
+ * @param interface_names
+ * @param status
+ * @param interface_count
+ * @return
+ */
 cs_error_t
 corosync_cfg_ring_status_get (
 	corosync_cfg_handle_t cfg_handle,
@@ -171,50 +162,59 @@ corosync_cfg_ring_status_get (
 	char ***status,
 	unsigned int *interface_count);
 
+/**
+ * @brief corosync_cfg_ring_reenable
+ * @param cfg_handle
+ * @return
+ */
 cs_error_t
 corosync_cfg_ring_reenable (
 	corosync_cfg_handle_t cfg_handle);
 
-cs_error_t
-corosync_cfg_service_load (
-	corosync_cfg_handle_t cfg_handle,
-	const char *service_name,
-	unsigned int service_ver);
-
-cs_error_t
-corosync_cfg_service_unload (
-	corosync_cfg_handle_t cfg_handle,
-	const char *service_name,
-	unsigned int service_ver);
-
+/**
+ * @brief corosync_cfg_kill_node
+ * @param cfg_handle
+ * @param nodeid
+ * @param reason
+ * @return
+ */
 cs_error_t
 corosync_cfg_kill_node (
 	corosync_cfg_handle_t cfg_handle,
 	unsigned int nodeid,
 	const char *reason);
 
+/**
+ * @brief corosync_cfg_try_shutdown
+ * @param cfg_handle
+ * @param flags
+ * @return
+ */
 cs_error_t
 corosync_cfg_try_shutdown (
 	corosync_cfg_handle_t cfg_handle,
 	corosync_cfg_shutdown_flags_t flags);
 
-
+/**
+ * @brief corosync_cfg_replyto_shutdown
+ * @param cfg_handle
+ * @param flags
+ * @return
+ */
 cs_error_t
 corosync_cfg_replyto_shutdown (
 	corosync_cfg_handle_t cfg_handle,
 	corosync_cfg_shutdown_reply_flags_t flags);
 
-cs_error_t
-corosync_cfg_state_track (
-        corosync_cfg_handle_t cfg_handle,
-        uint8_t track_flags,
-        const corosync_cfg_state_notification_t *notification_buffer);
-
-cs_error_t
-corosync_cfg_state_track_stop (
-        corosync_cfg_handle_t cfg_handle);
-
-
+/**
+ * @brief corosync_cfg_get_node_addrs
+ * @param cfg_handle
+ * @param nodeid
+ * @param max_addrs
+ * @param num_addrs
+ * @param addrs
+ * @return
+ */
 cs_error_t
 corosync_cfg_get_node_addrs (
 	corosync_cfg_handle_t cfg_handle,
@@ -223,15 +223,24 @@ corosync_cfg_get_node_addrs (
 	int *num_addrs,
 	corosync_cfg_node_address_t *addrs);
 
+/**
+ * @brief corosync_cfg_local_get
+ * @param handle
+ * @param local_nodeid
+ * @return
+ */
 cs_error_t
 corosync_cfg_local_get (
 	corosync_cfg_handle_t handle,
 	unsigned int *local_nodeid);
 
-cs_error_t
-corosync_cfg_crypto_set (
-	corosync_cfg_handle_t handle,
-	unsigned int type);
+/**
+ * @brief corosync_cfg_reload_config
+ * @param handle
+ * @return
+ */
+cs_error_t corosync_cfg_reload_config (
+	corosync_cfg_handle_t handle);
 
 #ifdef __cplusplus
 }

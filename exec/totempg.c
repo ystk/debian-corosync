@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2003-2005 MontaVista Software, Inc.
  * Copyright (c) 2005 OSDL.
- * Copyright (c) 2006-2009 Red Hat, Inc.
+ * Copyright (c) 2006-2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -87,7 +87,10 @@
 #ifdef HAVE_ALLOCA_H
 #include <alloca.h>
 #endif
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/uio.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,12 +101,12 @@
 #include <limits.h>
 
 #include <corosync/swab.h>
-#include <corosync/hdb.h>
 #include <corosync/list.h>
-#include <corosync/totem/coropoll.h>
+#include <qb/qbloop.h>
+#include <qb/qbipcs.h>
 #include <corosync/totem/totempg.h>
 #define LOGSYS_UTILS_ONLY 1
-#include <corosync/engine/logsys.h>
+#include <corosync/logsys.h>
 
 #include "totemmrp.h"
 #include "totemsrp.h"
@@ -115,6 +118,12 @@ struct totempg_mcast_header {
 	short type;
 };
 
+#if !(defined(__i386__) || defined(__x86_64__))
+/*
+ * Need align on architectures different then i386 or x86_64
+ */
+#define TOTEMPG_NEED_ALIGN 1
+#endif
 
 /*
  * totempg_mcast structure
@@ -157,6 +166,10 @@ static int totempg_reserved = 1;
 
 static unsigned int totempg_size_limit;
 
+static totem_queue_level_changed_fn totem_queue_level_changed = NULL;
+
+static uint32_t totempg_threaded_mode = 0;
+
 /*
  * Function and data used to log messages
  */
@@ -167,11 +180,12 @@ static int totempg_log_level_notice;
 static int totempg_log_level_debug;
 static int totempg_subsys_id;
 static void (*totempg_log_printf) (
-	unsigned int rec_ident,
+	int level,
+	int subsys,
 	const char *function,
 	const char *file,
 	int line,
-	const char *format, ...) __attribute__((format(printf, 5, 6)));
+	const char *format, ...) __attribute__((format(printf, 6, 7)));
 
 struct totem_config *totempg_totem_config;
 
@@ -198,7 +212,14 @@ static int callback_token_received_fn (enum totem_callback_token_type type,
 
 DECLARE_LIST_INIT(assembly_list_inuse);
 
+/*
+ * Free list is used both for transitional and operational assemblies
+ */
 DECLARE_LIST_INIT(assembly_list_free);
+
+DECLARE_LIST_INIT(assembly_list_inuse_trans);
+
+DECLARE_LIST_INIT(totempg_groups_list);
 
 /*
  * Staging buffer for packed messages.  Messages are staged in this buffer
@@ -216,9 +237,7 @@ static int fragment_size = 0;
 
 static int fragment_continuation = 0;
 
-static struct iovec iov_delv;
-
-static unsigned int totempg_max_handle = 0;
+static int totempg_waiting_transack = 0;
 
 struct totempg_group_instance {
 	void (*deliver_fn) (
@@ -237,9 +256,10 @@ struct totempg_group_instance {
 	struct totempg_group *groups;
 
 	int groups_cnt;
-};
+	int32_t q_level;
 
-DECLARE_HDB_DATABASE (totempg_groups_instance_database,NULL);
+	struct list_head list;
+};
 
 static unsigned char next_fragment = 1;
 
@@ -249,30 +269,41 @@ static pthread_mutex_t callback_token_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_mutex_t mcast_msg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define log_printf(level, format, args...)				\
-do {									\
-        totempg_log_printf (						\
-		LOGSYS_ENCODE_RECID(level,				\
-				    totempg_subsys_id,			\
-				    LOGSYS_RECID_LOG),			\
-		__FUNCTION__, __FILE__, __LINE__,			\
-		format, ##args);					\
+#define log_printf(level, format, args...)			\
+do {								\
+        totempg_log_printf(level,				\
+			   totempg_subsys_id,			\
+			   __FUNCTION__, __FILE__, __LINE__,	\
+			   format, ##args);			\
 } while (0);
 
 static int msg_count_send_ok (int msg_count);
 
 static int byte_count_send_ok (int byte_count);
 
+static void totempg_waiting_trans_ack_cb (int waiting_trans_ack)
+{
+	log_printf(LOG_DEBUG, "waiting_trans_ack changed to %u", waiting_trans_ack);
+	totempg_waiting_transack = waiting_trans_ack;
+}
+
 static struct assembly *assembly_ref (unsigned int nodeid)
 {
 	struct assembly *assembly;
 	struct list_head *list;
+	struct list_head *active_assembly_list_inuse;
+
+	if (totempg_waiting_transack) {
+		active_assembly_list_inuse = &assembly_list_inuse_trans;
+	} else {
+		active_assembly_list_inuse = &assembly_list_inuse;
+	}
 
 	/*
 	 * Search inuse list for node id and return assembly buffer if found
 	 */
-	for (list = assembly_list_inuse.next;
-		list != &assembly_list_inuse;
+	for (list = active_assembly_list_inuse->next;
+		list != active_assembly_list_inuse;
 		list = list->next) {
 
 		assembly = list_entry (list, struct assembly, list);
@@ -288,7 +319,7 @@ static struct assembly *assembly_ref (unsigned int nodeid)
 	if (list_empty (&assembly_list_free) == 0) {
 		assembly = list_entry (assembly_list_free.next, struct assembly, list);
 		list_del (&assembly->list);
-		list_add (&assembly->list, &assembly_list_inuse);
+		list_add (&assembly->list, active_assembly_list_inuse);
 		assembly->nodeid = nodeid;
 		assembly->index = 0;
 		assembly->last_frag_num = 0;
@@ -310,15 +341,46 @@ static struct assembly *assembly_ref (unsigned int nodeid)
 	assembly->last_frag_num = 0;
 	assembly->throw_away_mode = THROW_AWAY_INACTIVE;
 	list_init (&assembly->list);
-	list_add (&assembly->list, &assembly_list_inuse);
+	list_add (&assembly->list, active_assembly_list_inuse);
 
 	return (assembly);
 }
 
 static void assembly_deref (struct assembly *assembly)
 {
+
 	list_del (&assembly->list);
 	list_add (&assembly->list, &assembly_list_free);
+}
+
+static void assembly_deref_from_normal_and_trans (int nodeid)
+{
+	int j;
+	struct list_head *list, *list_next;
+	struct list_head *active_assembly_list_inuse;
+	struct assembly *assembly;
+
+	for (j = 0; j < 2; j++) {
+		if (j == 0) {
+			active_assembly_list_inuse = &assembly_list_inuse;
+		} else {
+			active_assembly_list_inuse = &assembly_list_inuse_trans;
+		}
+
+		for (list = active_assembly_list_inuse->next;
+			list != active_assembly_list_inuse;
+			list = list_next) {
+
+			list_next = list->next;
+			assembly = list_entry (list, struct assembly, list);
+
+			if (nodeid == assembly->nodeid) {
+				list_del (&assembly->list);
+				list_add (&assembly->list, &assembly_list_free);
+			}
+		}
+	}
+
 }
 
 static inline void app_confchg_fn (
@@ -330,8 +392,7 @@ static inline void app_confchg_fn (
 {
 	int i;
 	struct totempg_group_instance *instance;
-	struct assembly *assembly;
-	unsigned int res;
+	struct list_head *list;
 
 	/*
 	 * For every leaving processor, add to free list
@@ -339,29 +400,25 @@ static inline void app_confchg_fn (
 	 * In the leaving processor's assembly buffer.
 	 */
 	for (i = 0; i < left_list_entries; i++) {
-		assembly = assembly_ref (left_list[i]);
-		list_del (&assembly->list);
-		list_add (&assembly->list, &assembly_list_free);
+		assembly_deref_from_normal_and_trans (left_list[i]);
 	}
-	for (i = 0; i <= totempg_max_handle; i++) {
-		res = hdb_handle_get (&totempg_groups_instance_database,
-			hdb_nocheck_convert (i), (void *)&instance);
 
-		if (res == 0) {
-			if (instance->confchg_fn) {
-				instance->confchg_fn (
-					configuration_type,
-					member_list,
-					member_list_entries,
-					left_list,
-					left_list_entries,
-					joined_list,
-					joined_list_entries,
-					ring_id);
-			}
+	for (list = totempg_groups_list.next;
+		list != &totempg_groups_list;
+		list = list->next) {
 
-			hdb_handle_put (&totempg_groups_instance_database,
-				hdb_nocheck_convert (i));
+		instance = list_entry (list, struct totempg_group_instance, list);
+
+		if (instance->confchg_fn) {
+			instance->confchg_fn (
+				configuration_type,
+				member_list,
+				member_list_entries,
+				left_list,
+				left_list_entries,
+				joined_list,
+				joined_list_entries,
+				ring_id);
 		}
 	}
 }
@@ -374,8 +431,9 @@ static inline void group_endian_convert (
 	int i;
 	char *aligned_msg;
 
+#ifdef TOTEMPG_NEED_ALIGN
 	/*
-	 * Align data structure for sparc and ia64
+	 * Align data structure for not i386 or x86_64
 	 */
 	if ((size_t)msg % 4 != 0) {
 		aligned_msg = alloca(msg_len);
@@ -383,6 +441,9 @@ static inline void group_endian_convert (
 	} else {
 		aligned_msg = msg;
 	}
+#else
+	aligned_msg = msg;
+#endif
 
 	group_len = (unsigned short *)aligned_msg;
 	group_len[0] = swab16(group_len[0]);
@@ -406,12 +467,15 @@ static inline int group_matches (
 	char *group_name;
 	int i;
 	int j;
+#ifdef TOTEMPG_NEED_ALIGN
         struct iovec iovec_aligned = { NULL, 0 };
+#endif
 
 	assert (iov_len == 1);
 
+#ifdef TOTEMPG_NEED_ALIGN
 	/*
-	 * Align data structure for sparc and ia64
+	 * Align data structure for not i386 or x86_64
 	 */
 	if ((size_t)iovec->iov_base % 4 != 0) {
 		iovec_aligned.iov_base = alloca(iovec->iov_len);
@@ -419,7 +483,7 @@ static inline int group_matches (
 		iovec_aligned.iov_len = iovec->iov_len;
 		iovec = &iovec_aligned;
 	}
-
+#endif
 
 	group_len = (unsigned short *)iovec->iov_base;
 	group_name = ((char *)iovec->iov_base) +
@@ -456,12 +520,11 @@ static inline void app_deliver_fn (
 	unsigned int msg_len,
 	int endian_conversion_required)
 {
-	int i;
 	struct totempg_group_instance *instance;
 	struct iovec stripped_iovec;
 	unsigned int adjust_iovec;
-	unsigned int res;
 	struct iovec *iovec;
+	struct list_head *list;
 
         struct iovec aligned_iovec = { NULL, 0 };
 
@@ -469,48 +532,55 @@ static inline void app_deliver_fn (
 		group_endian_convert (msg, msg_len);
 	}
 
-/*
- * TODO This function needs to be rewritten for proper alignment to avoid 3+ memory copies
- */
 	/*
-	 * Align data structure for sparc and ia64
+	 * TODO: segmentation/assembly need to be redesigned to provide aligned access
+	 * in all cases to avoid memory copies on non386 archs. Probably broke backwars
+	 * compatibility
+	 */
+
+#ifdef TOTEMPG_NEED_ALIGN
+	/*
+	 * Align data structure for not i386 or x86_64
 	 */
 	aligned_iovec.iov_base = alloca(msg_len);
 	aligned_iovec.iov_len = msg_len;
 	memcpy(aligned_iovec.iov_base, msg, msg_len);
+#else
+	aligned_iovec.iov_base = msg;
+	aligned_iovec.iov_len = msg_len;
+#endif
+
 	iovec = &aligned_iovec;
 
-	for (i = 0; i <= totempg_max_handle; i++) {
-		res = hdb_handle_get (&totempg_groups_instance_database,
-			hdb_nocheck_convert (i), (void *)&instance);
+	for (list = totempg_groups_list.next;
+		list != &totempg_groups_list;
+		list = list->next) {
 
-		if (res == 0) {
-			if (group_matches (iovec, 1, instance->groups, instance->groups_cnt, &adjust_iovec)) {
-				stripped_iovec.iov_len = iovec->iov_len - adjust_iovec;
-				stripped_iovec.iov_base = (char *)iovec->iov_base + adjust_iovec;
+		instance = list_entry (list, struct totempg_group_instance, list);
+		if (group_matches (iovec, 1, instance->groups, instance->groups_cnt, &adjust_iovec)) {
+			stripped_iovec.iov_len = iovec->iov_len - adjust_iovec;
+			stripped_iovec.iov_base = (char *)iovec->iov_base + adjust_iovec;
 
+#ifdef TOTEMPG_NEED_ALIGN
+			/*
+			 * Align data structure for not i386 or x86_64
+			 */
+			if ((char *)iovec->iov_base + adjust_iovec % 4 != 0) {
 				/*
-				 * Align data structure for sparc and ia64
+				 * Deal with misalignment
 				 */
-				if ((char *)iovec->iov_base + adjust_iovec % 4 != 0) {
-					/*
-					 * Deal with misalignment
-					 */
-					stripped_iovec.iov_base =
-						alloca (stripped_iovec.iov_len);
-					memcpy (stripped_iovec.iov_base,
-						 (char *)iovec->iov_base + adjust_iovec,
-						stripped_iovec.iov_len);
-				}
-
-				instance->deliver_fn (
-					nodeid,
-					stripped_iovec.iov_base,
-					stripped_iovec.iov_len,
-					endian_conversion_required);
+				stripped_iovec.iov_base =
+					alloca (stripped_iovec.iov_len);
+				memcpy (stripped_iovec.iov_base,
+					 (char *)iovec->iov_base + adjust_iovec,
+					stripped_iovec.iov_len);
 			}
-
-			hdb_handle_put (&totempg_groups_instance_database, hdb_nocheck_convert(i));
+#endif
+			instance->deliver_fn (
+				nodeid,
+				stripped_iovec.iov_base,
+				stripped_iovec.iov_len,
+				endian_conversion_required);
 		}
 	}
 }
@@ -546,6 +616,7 @@ static void totempg_deliver_fn (
 	int start;
 	const char *data;
 	int datasize;
+	struct iovec iov_delv;
 
 	assembly = assembly_ref (nodeid);
 	assert (assembly);
@@ -624,6 +695,8 @@ static void totempg_deliver_fn (
 				}
 			}
 		} else {
+			log_printf (LOG_DEBUG, "fragmented continuation %u is not equal to assembly last_frag_num %u",
+					continuation, assembly->last_frag_num);
 			assembly->throw_away_mode = THROW_AWAY_ACTIVE;
 		}
 	}
@@ -662,18 +735,24 @@ int callback_token_received_fn (enum totem_callback_token_type type,
 {
 	struct totempg_mcast mcast;
 	struct iovec iovecs[3];
-	int res;
 
-	pthread_mutex_lock (&mcast_msg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&mcast_msg_mutex);
+	}
 	if (mcast_packed_msg_count == 0) {
-		pthread_mutex_unlock (&mcast_msg_mutex);
+		if (totempg_threaded_mode == 1) {
+			pthread_mutex_unlock (&mcast_msg_mutex);
+		}
 		return (0);
 	}
 	if (totemmrp_avail() == 0) {
-		pthread_mutex_unlock (&mcast_msg_mutex);
+		if (totempg_threaded_mode == 1) {
+			pthread_mutex_unlock (&mcast_msg_mutex);
+		}
 		return (0);
 	}
 	mcast.header.version = 0;
+	mcast.header.type = 0;
 	mcast.fragmented = 0;
 
 	/*
@@ -691,12 +770,14 @@ int callback_token_received_fn (enum totem_callback_token_type type,
 	iovecs[1].iov_len = mcast_packed_msg_count * sizeof (unsigned short);
 	iovecs[2].iov_base = (void *)&fragmentation_data[0];
 	iovecs[2].iov_len = fragment_size;
-	res = totemmrp_mcast (iovecs, 3, 0);
+	(void)totemmrp_mcast (iovecs, 3, 0);
 
 	mcast_packed_msg_count = 0;
 	fragment_size = 0;
 
-	pthread_mutex_unlock (&mcast_msg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&mcast_msg_mutex);
+	}
 	return (0);
 }
 
@@ -704,7 +785,7 @@ int callback_token_received_fn (enum totem_callback_token_type type,
  * Initialize the totem process group abstraction
  */
 int totempg_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t *poll_handle,
 	struct totem_config *totem_config)
 {
 	int res;
@@ -730,7 +811,8 @@ int totempg_initialize (
 		totem_config,
 		&totempg_stats,
 		totempg_deliver_fn,
-		totempg_confchg_fn);
+		totempg_confchg_fn,
+		totempg_waiting_trans_ack_cb);
 
 	totemmrp_callback_token_create (
 		&callback_token_received_handle,
@@ -743,14 +825,20 @@ int totempg_initialize (
 		(totempg_totem_config->net_mtu -
 		sizeof (struct totempg_mcast) - 16);
 
+	list_init (&totempg_groups_list);
+
 	return (res);
 }
 
 void totempg_finalize (void)
 {
-	pthread_mutex_lock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
+	}
 	totemmrp_finalize ();
-	pthread_mutex_unlock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&totempg_mutex);
+	}
 }
 
 /*
@@ -772,7 +860,9 @@ static int mcast_msg (
 	int copy_base = 0;
 	int total_size = 0;
 
-	pthread_mutex_lock (&mcast_msg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&mcast_msg_mutex);
+	}
 	totemmrp_event_signal (TOTEM_EVENT_NEW_MSG, 1);
 
 	/*
@@ -802,7 +892,9 @@ static int mcast_msg (
 	if (byte_count_send_ok (total_size + sizeof(unsigned short) *
 		(mcast_packed_msg_count)) == 0) {
 
-		pthread_mutex_unlock (&mcast_msg_mutex);
+		if (totempg_threaded_mode == 1) {
+			pthread_mutex_unlock (&mcast_msg_mutex);
+		}
 		return(-1);
 	}
 
@@ -920,7 +1012,9 @@ static int mcast_msg (
 	}
 
 error_exit:
-	pthread_mutex_unlock (&mcast_msg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&mcast_msg_mutex);
+	}
 	return (res);
 }
 
@@ -933,6 +1027,7 @@ static int msg_count_send_ok (
 	int avail = 0;
 
 	avail = totemmrp_avail ();
+	totempg_stats.msg_queue_avail = avail;
 
 	return ((avail - totempg_reserved) > msg_count);
 }
@@ -957,6 +1052,7 @@ static int send_reserve (
 
 	msg_count = (msg_size / (totempg_totem_config->net_mtu - sizeof (struct totempg_mcast) - 16)) + 1;
 	totempg_reserved += msg_count;
+	totempg_stats.msg_reserved = totempg_reserved;
 
 	return (msg_count);
 }
@@ -965,6 +1061,17 @@ static void send_release (
 	int msg_count)
 {
 	totempg_reserved -= msg_count;
+	totempg_stats.msg_reserved = totempg_reserved;
+}
+
+#ifndef HAVE_SMALL_MEMORY_FOOTPRINT
+#undef MESSAGE_QUEUE_MAX
+#define MESSAGE_QUEUE_MAX	((4 * MESSAGE_SIZE_MAX) / totempg_totem_config->net_mtu)
+#endif /* HAVE_SMALL_MEMORY_FOOTPRINT */
+
+static uint32_t q_level_precent_used(void)
+{
+	return (100 - (((totemmrp_avail() - totempg_reserved) * 100) / MESSAGE_QUEUE_MAX));
 }
 
 int totempg_callback_token_create (
@@ -975,19 +1082,27 @@ int totempg_callback_token_create (
 	const void *data)
 {
 	unsigned int res;
-	pthread_mutex_lock (&callback_token_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&callback_token_mutex);
+	}
 	res = totemmrp_callback_token_create (handle_out, type, delete,
 		callback_fn, data);
-	pthread_mutex_unlock (&callback_token_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&callback_token_mutex);
+	}
 	return (res);
 }
 
 void totempg_callback_token_destroy (
 	void *handle_out)
 {
-	pthread_mutex_lock (&callback_token_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&callback_token_mutex);
+	}
 	totemmrp_callback_token_destroy (handle_out);
-	pthread_mutex_unlock (&callback_token_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&callback_token_mutex);
+	}
 }
 
 /*
@@ -995,7 +1110,7 @@ void totempg_callback_token_destroy (
  */
 
 int totempg_groups_initialize (
-	hdb_handle_t *handle,
+	void **totempg_groups_instance,
 
 	void (*deliver_fn) (
 		unsigned int nodeid,
@@ -1011,59 +1126,50 @@ int totempg_groups_initialize (
 		const struct memb_ring_id *ring_id))
 {
 	struct totempg_group_instance *instance;
-	unsigned int res;
 
-	pthread_mutex_lock (&totempg_mutex);
-	res = hdb_handle_create (&totempg_groups_instance_database,
-		sizeof (struct totempg_group_instance), handle);
-	if (res != 0) {
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
+	}
+	
+	instance = malloc (sizeof (struct totempg_group_instance));
+	if (instance == NULL) {
 		goto error_exit;
-	}
-
-	if (*handle > totempg_max_handle) {
-		totempg_max_handle = *handle;
-	}
-
-	res = hdb_handle_get (&totempg_groups_instance_database, *handle,
-		(void *)&instance);
-	if (res != 0) {
-		goto error_destroy;
 	}
 
 	instance->deliver_fn = deliver_fn;
 	instance->confchg_fn = confchg_fn;
 	instance->groups = 0;
 	instance->groups_cnt = 0;
+	instance->q_level = QB_LOOP_MED;
+	list_init (&instance->list);
+	list_add (&instance->list, &totempg_groups_list);
 
-
-	hdb_handle_put (&totempg_groups_instance_database, *handle);
-
-	pthread_mutex_unlock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&totempg_mutex);
+	}
+	*totempg_groups_instance = instance;
 	return (0);
-error_destroy:
-	hdb_handle_destroy (&totempg_groups_instance_database, *handle);
 
 error_exit:
-	pthread_mutex_unlock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&totempg_mutex);
+	}
 	return (-1);
 }
 
 int totempg_groups_join (
-	hdb_handle_t handle,
+	void *totempg_groups_instance,
 	const struct totempg_group *groups,
 	size_t group_cnt)
 {
-	struct totempg_group_instance *instance;
+	struct totempg_group_instance *instance = (struct totempg_group_instance *)totempg_groups_instance;
 	struct totempg_group *new_groups;
-	unsigned int res;
+	unsigned int res = 0;
 
-	pthread_mutex_lock (&totempg_mutex);
-	res = hdb_handle_get (&totempg_groups_instance_database, handle,
-		(void *)&instance);
-	if (res != 0) {
-		goto error_exit;
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
 	}
-
+	
 	new_groups = realloc (instance->groups,
 		sizeof (struct totempg_group) *
 		(instance->groups_cnt + group_cnt));
@@ -1076,57 +1182,47 @@ int totempg_groups_join (
 	instance->groups = new_groups;
 	instance->groups_cnt += group_cnt;
 
-	hdb_handle_put (&totempg_groups_instance_database, handle);
-
 error_exit:
-	pthread_mutex_unlock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&totempg_mutex);
+	}
 	return (res);
 }
 
 int totempg_groups_leave (
-	hdb_handle_t handle,
+	void *totempg_groups_instance,
 	const struct totempg_group *groups,
 	size_t group_cnt)
 {
-	struct totempg_group_instance *instance;
-	unsigned int res;
-
-	pthread_mutex_lock (&totempg_mutex);
-	res = hdb_handle_get (&totempg_groups_instance_database, handle,
-		(void *)&instance);
-	if (res != 0) {
-		goto error_exit;
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
 	}
 
-	hdb_handle_put (&totempg_groups_instance_database, handle);
-
-error_exit:
-	pthread_mutex_unlock (&totempg_mutex);
-	return (res);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&totempg_mutex);
+	}
+	return (0);
 }
 
 #define MAX_IOVECS_FROM_APP 32
 #define MAX_GROUPS_PER_MSG 32
 
 int totempg_groups_mcast_joined (
-	hdb_handle_t handle,
+	void *totempg_groups_instance,
 	const struct iovec *iovec,
 	unsigned int iov_len,
 	int guarantee)
 {
-	struct totempg_group_instance *instance;
+	struct totempg_group_instance *instance = (struct totempg_group_instance *)totempg_groups_instance;
 	unsigned short group_len[MAX_GROUPS_PER_MSG + 1];
 	struct iovec iovec_mcast[MAX_GROUPS_PER_MSG + 1 + MAX_IOVECS_FROM_APP];
 	int i;
 	unsigned int res;
 
-	pthread_mutex_lock (&totempg_mutex);
-	res = hdb_handle_get (&totempg_groups_instance_database, handle,
-		(void *)&instance);
-	if (res != 0) {
-		goto error_exit;
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
 	}
-
+	
 	/*
 	 * Build group_len structure and the iovec_mcast structure
 	 */
@@ -1144,30 +1240,56 @@ int totempg_groups_mcast_joined (
 	}
 
 	res = mcast_msg (iovec_mcast, iov_len + instance->groups_cnt + 1, guarantee);
-	hdb_handle_put (&totempg_groups_instance_database, handle);
 
-error_exit:
-	pthread_mutex_unlock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&totempg_mutex);
+	}
+	
 	return (res);
 }
 
+static void check_q_level(
+	void *totempg_groups_instance)
+{
+	struct totempg_group_instance *instance = (struct totempg_group_instance *)totempg_groups_instance;
+	int32_t old_level = instance->q_level;
+	int32_t percent_used = q_level_precent_used();
+
+	if (percent_used >= 75 && instance->q_level != TOTEM_Q_LEVEL_CRITICAL) {
+		instance->q_level = TOTEM_Q_LEVEL_CRITICAL;
+	} else if (percent_used < 30 && instance->q_level != TOTEM_Q_LEVEL_LOW) {
+		instance->q_level = TOTEM_Q_LEVEL_LOW;
+	} else if (percent_used > 40 && percent_used < 50 && instance->q_level != TOTEM_Q_LEVEL_GOOD) {
+		instance->q_level = TOTEM_Q_LEVEL_GOOD;
+	} else if (percent_used > 60 && percent_used < 70 && instance->q_level != TOTEM_Q_LEVEL_HIGH) {
+		instance->q_level = TOTEM_Q_LEVEL_HIGH;
+	}
+	if (totem_queue_level_changed && old_level != instance->q_level) {
+		totem_queue_level_changed(instance->q_level);
+	}
+}
+
+void totempg_check_q_level(
+	void *totempg_groups_instance)
+{
+	struct totempg_group_instance *instance = (struct totempg_group_instance *)totempg_groups_instance;
+
+	check_q_level(instance);
+}
+
 int totempg_groups_joined_reserve (
-	hdb_handle_t handle,
+	void *totempg_groups_instance,
 	const struct iovec *iovec,
 	unsigned int iov_len)
 {
-	struct totempg_group_instance *instance;
+	struct totempg_group_instance *instance = (struct totempg_group_instance *)totempg_groups_instance;
 	unsigned int size = 0;
 	unsigned int i;
-	unsigned int res;
 	unsigned int reserved = 0;
 
-	pthread_mutex_lock (&totempg_mutex);
-	pthread_mutex_lock (&mcast_msg_mutex);
-	res = hdb_handle_get (&totempg_groups_instance_database, handle,
-		(void *)&instance);
-	if (res != 0) {
-		goto error_exit;
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
+		pthread_mutex_lock (&mcast_msg_mutex);
 	}
 
 	for (i = 0; i < instance->groups_cnt; i++) {
@@ -1176,56 +1298,58 @@ int totempg_groups_joined_reserve (
 	for (i = 0; i < iov_len; i++) {
 		size += iovec[i].iov_len;
 	}
+
 	if (size >= totempg_size_limit) {
 		reserved = -1;
-		goto error_put;
+		goto error_exit;
 	}
 
-	reserved = send_reserve (size);
-	if (msg_count_send_ok (reserved) == 0) {
-		send_release (reserved);
+	if (byte_count_send_ok (size)) {
+		reserved = send_reserve (size);
+	} else {
 		reserved = 0;
 	}
 
-error_put:
-	hdb_handle_put (&totempg_groups_instance_database, handle);
-
 error_exit:
-	pthread_mutex_unlock (&mcast_msg_mutex);
-	pthread_mutex_unlock (&totempg_mutex);
+	check_q_level(instance);
+
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&mcast_msg_mutex);
+		pthread_mutex_unlock (&totempg_mutex);
+	}
 	return (reserved);
 }
 
 
 int totempg_groups_joined_release (int msg_count)
 {
-	pthread_mutex_lock (&totempg_mutex);
-	pthread_mutex_lock (&mcast_msg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
+		pthread_mutex_lock (&mcast_msg_mutex);
+	}
 	send_release (msg_count);
-	pthread_mutex_unlock (&mcast_msg_mutex);
-	pthread_mutex_unlock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&mcast_msg_mutex);
+		pthread_mutex_unlock (&totempg_mutex);
+	}
 	return 0;
 }
 
 int totempg_groups_mcast_groups (
-	hdb_handle_t handle,
+	void *totempg_groups_instance,
 	int guarantee,
 	const struct totempg_group *groups,
 	size_t groups_cnt,
 	const struct iovec *iovec,
 	unsigned int iov_len)
 {
-	struct totempg_group_instance *instance;
 	unsigned short group_len[MAX_GROUPS_PER_MSG + 1];
 	struct iovec iovec_mcast[MAX_GROUPS_PER_MSG + 1 + MAX_IOVECS_FROM_APP];
 	int i;
 	unsigned int res;
 
-	pthread_mutex_lock (&totempg_mutex);
-	res = hdb_handle_get (&totempg_groups_instance_database, handle,
-		(void *)&instance);
-	if (res != 0) {
-		goto error_exit;
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
 	}
 
 	/*
@@ -1246,10 +1370,9 @@ int totempg_groups_mcast_groups (
 
 	res = mcast_msg (iovec_mcast, iov_len + groups_cnt + 1, guarantee);
 
-	hdb_handle_put (&totempg_groups_instance_database, handle);
-
-error_exit:
-	pthread_mutex_unlock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&totempg_mutex);
+	}
 	return (res);
 }
 
@@ -1257,22 +1380,18 @@ error_exit:
  * Returns -1 if error, 0 if can't send, 1 if can send the message
  */
 int totempg_groups_send_ok_groups (
-	hdb_handle_t handle,
+	void *totempg_groups_instance,
 	const struct totempg_group *groups,
 	size_t groups_cnt,
 	const struct iovec *iovec,
 	unsigned int iov_len)
 {
-	struct totempg_group_instance *instance;
 	unsigned int size = 0;
 	unsigned int i;
 	unsigned int res;
 
-	pthread_mutex_lock (&totempg_mutex);
-	res = hdb_handle_get (&totempg_groups_instance_database, handle,
-		(void *)&instance);
-	if (res != 0) {
-		goto error_exit;
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_lock (&totempg_mutex);
 	}
 
 	for (i = 0; i < groups_cnt; i++) {
@@ -1284,15 +1403,16 @@ int totempg_groups_send_ok_groups (
 
 	res = msg_count_send_ok (size);
 
-	hdb_handle_put (&totempg_groups_instance_database, handle);
-error_exit:
-	pthread_mutex_unlock (&totempg_mutex);
+	if (totempg_threaded_mode == 1) {
+		pthread_mutex_unlock (&totempg_mutex);
+	}
 	return (res);
 }
 
 int totempg_ifaces_get (
 	unsigned int nodeid,
 	struct totem_ip_address *interfaces,
+	unsigned int interfaces_size,
 	char ***status,
 	unsigned int *iface_count)
 {
@@ -1301,6 +1421,7 @@ int totempg_ifaces_get (
 	res = totemmrp_ifaces_get (
 		nodeid,
 		interfaces,
+		interfaces_size,
 		status,
 		iface_count);
 
@@ -1318,12 +1439,12 @@ void* totempg_get_stats (void)
 }
 
 int totempg_crypto_set (
-	unsigned int type)
+	const char *cipher_type,
+	const char *hash_type)
 {
 	int res;
 
-	res = totemmrp_crypto_set (
-		type);
+	res = totemmrp_crypto_set (cipher_type, hash_type);
 
 	return (res);
 }
@@ -1337,10 +1458,11 @@ int totempg_ring_reenable (void)
 	return (res);
 }
 
+#define ONE_IFACE_LEN 63
 const char *totempg_ifaces_print (unsigned int nodeid)
 {
 	static char iface_string[256 * INTERFACE_MAX];
-	char one_iface[64];
+	char one_iface[ONE_IFACE_LEN+1];
 	struct totem_ip_address interfaces[INTERFACE_MAX];
 	char **status;
 	unsigned int iface_count;
@@ -1349,14 +1471,17 @@ const char *totempg_ifaces_print (unsigned int nodeid)
 
 	iface_string[0] = '\0';
 
-	res = totempg_ifaces_get (nodeid, interfaces, &status, &iface_count);
+	res = totempg_ifaces_get (nodeid, interfaces, INTERFACE_MAX, &status, &iface_count);
 	if (res == -1) {
 		return ("no interface found for nodeid");
 	}
 
+	res = totempg_ifaces_get (nodeid, interfaces, INTERFACE_MAX, &status, &iface_count);
+
 	for (i = 0; i < iface_count; i++) {
-		sprintf (one_iface, "r(%d) ip(%s) ",
-			i, totemip_print (&interfaces[i]));
+		snprintf (one_iface, ONE_IFACE_LEN,
+			  "r(%d) ip(%s) ",
+			  i, totemip_print (&interfaces[i]));
 		strcat (iface_string, one_iface);
 	}
 	return (iface_string);
@@ -1375,5 +1500,35 @@ extern void totempg_service_ready_register (
 	void (*totem_service_ready) (void))
 {
 	totemmrp_service_ready_register (totem_service_ready);
+}
+
+void totempg_queue_level_register_callback (totem_queue_level_changed_fn fn)
+{
+	totem_queue_level_changed = fn;
+}
+
+extern int totempg_member_add (
+	const struct totem_ip_address *member,
+	int ring_no)
+{
+	return totemmrp_member_add (member, ring_no);
+}
+
+extern int totempg_member_remove (
+	const struct totem_ip_address *member,
+	int ring_no)
+{
+	return totemmrp_member_remove (member, ring_no);
+}
+
+void totempg_threaded_mode_enable (void)
+{
+	totempg_threaded_mode = 1;
+	totemmrp_threaded_mode_enable ();
+}
+
+void totempg_trans_ack (void)
+{
+	totemmrp_trans_ack ();
 }
 

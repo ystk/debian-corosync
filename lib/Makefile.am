@@ -30,137 +30,37 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 # THE POSSIBILITY OF SUCH DAMAGE.
 
+# Functions to be used at link time (target.lo)
+get_libname=$(shell echo $1 | sed -e "s/\.lo//")
+uc=$(shell echo $(call get_libname,$1) | tr a-z A-Z)
+get_soname=$(subst .,:,$(if $($(call uc,$1)_SONAME),$($(call uc,$1)_SONAME),$(SONAME)))
+get_major=$(firstword $(subst :, ,$(call get_soname,$1)))
+
 MAINTAINERCLEANFILES    = Makefile.in
 
-AM_CFLAGS		= -fPIC
+EXTRA_DIST		= libcfg.versions	 libcfg.verso		\
+			  libcmap.versions	 libcmap.verso		\
+			  libcpg.versions	 libcpg.verso    	\
+			  libquorum.versions	 libquorum.verso 	\
+			  libsam.versions	 libsam.verso    	\
+			  libvotequorum.versions libvotequorum.verso
 
-AM_LDFLAGS		= -lpthread
+noinst_HEADERS		= util.h
 
-INCLUDES		= -I$(top_builddir)/include -I$(top_srcdir)/include
+# override global LIBS that pulls in lots of craft we don't need here
+LIBS			= -version-number $(call get_soname,$<) \
+			  @VERSCRIPT_LDFLAGS@ \
+			  -lpthread \
+			  $(top_builddir)/common_lib/libcorosync_common.la \
+			  $(LIBQB_LIBS)
 
-lib_LIBRARIES		= libcpg.a libconfdb.a libevs.a libcfg.a libquorum.a \
-			  libvotequorum.a libpload.a libcoroipcc.a libsam.a
-SHARED_LIBS		= $(filter-out libcpg.so.$(SONAME), $(lib_LIBRARIES:%.a=%.so.$(SONAME))) libcpg.so.$(CPG_SONAME)
-SHARED_LIBS_SO		= $(lib_LIBRARIES:%.a=%.so)
-SHARED_LIBS_SO_TWO	= $(lib_LIBRARIES:%.a=%.so.$(SOMAJOR))
+lib_LTLIBRARIES		= libcpg.la libquorum.la libcfg.la \
+			  libvotequorum.la libcmap.la libsam.la
 
-libcpg_a_SOURCES	= cpg.c
-libcfg_a_SOURCES	= cfg.c
-libevs_a_SOURCES	= evs.c
-libpload_a_SOURCES	= pload.c
-libquorum_a_SOURCES	= quorum.c
-libvotequorum_a_SOURCES	= votequorum.c
-libconfdb_a_SOURCES	= confdb.c sa-confdb.c
-libcoroipcc_a_SOURCES	= coroipcc.c
-libsam_a_SOURCES	= sam.c
-
-noinst_HEADERS		= sa-confdb.h util.h \
-			  libcfg.versions libconfdb.versions \
-			  libcoroipcc.versions libcpg.versions \
-			  libevs.versions libpload.versions \
-			  libquorum.versions libvotequorum.versions \
-			  libsam.versions
-
-../lcr/lcr_ifact.o:
-	$(MAKE) -C ../lcr lcr_ifact.o
-
-if BUILD_DARWIN
-
-libcoroipcc.so.$(SONAME): coroipcc.o
-	$(CC) $(LDFLAGS) $(DARWIN_OPTS) coroipcc.o -o $@ $(AM_LDFLAGS)
-	ln -sf libcoroipcc.so.$(SONAME) libcoroipcc.so
-	ln -sf libcoroipcc.so.$(SONAME) libcoroipcc.so.$(SOMAJOR)
-
-libconfdb.so.$(SONAME): confdb.o sa-confdb.o libcoroipcc.so.$(SONAME)
-	$(CC) $(LDFLAGS) $(DARWIN_OPTS) coroipcc.o confdb.o \
-		sa-confdb.o ../lcr/lcr_ifact.o -o $@ -ldl $(AM_LDFLAGS)
-	ln -sf libconfdb.so.$(SONAME) libconfdb.so
-	ln -sf libconfdb.so.$(SONAME) libconfdb.so.$(SOMAJOR)
-
-libcpg.so.$(CPG_SONAME): cpg.o libcoroipcc.so.$(SONAME)
-	$(CC) $(DARWIN_OPTS) $^ -o $@
-	ln -sf $@ libcpg.so
-	ln -sf $@ libcpg.so.$(SOMAJOR)
-
-lib%.so.$(SONAME): %.o libcoroipcc.so.$(SONAME)
-	$(CC) $(DARWIN_OPTS) $^ -o $@
-	ln -sf lib$*.so.$(SONAME) lib$*.so
-	ln -sf lib$*.so.$(SONAME) lib$*.so.$(SOMAJOR)
-
-else
-
-if BUILD_SOLARIS
-
-libcoroipcc.so.$(SONAME): coroipcc.o
-	$(LD) $(LDFLAGS) $(SOLARIS_OPTS) -G coroipcc.o -o $@ $(AM_LDFLAGS) -lsocket -lnsl
-	ln -sf libcoroipcc.so.$(SONAME) libcoroipcc.so
-	ln -sf libcoroipcc.so.$(SONAME) libcoroipcc.so.$(SOMAJOR)
-
-libconfdb.so.$(SONAME): confdb.o sa-confdb.o libcoroipcc.so.$(SONAME)
-	$(LD) $(LDFLAGS) $(SOLARIS_OPTS) -G coroipcc.o confdb.o \
-		sa-confdb.o ../lcr/lcr_ifact.o -o $@ -ldl $(AM_LDFLAGS)
-	ln -sf libconfdb.so.$(SONAME) libconfdb.so
-	ln -sf libconfdb.so.$(SONAME) libconfdb.so.$(SOMAJOR)
-
-libcpg.so.$(CPG_SONAME): cpg.o libcoroipcc.so.$(SONAME)
-	$(LD) $(SOLARIS_OPTS) -G $^ -o $@
-	ln -sf $@ libcpg.so
-	ln -sf $@ libcpg.so.$(SOMAJOR)
-
-lib%.so.$(SONAME): %.o libcoroipcc.so.$(SONAME)
-	$(LD) $(SOLARIS_OPTS) -G $^ -o $@
-	ln -sf lib$*.so.$(SONAME) lib$*.so
-	ln -sf lib$*.so.$(SONAME) lib$*.so.$(SOMAJOR)
-
-else
-
-libcoroipcc.so.$(SONAME): coroipcc.o
-	$(CC) -shared -o $@ \
-		-Wl,-soname=libcoroipcc.so.$(SOMAJOR) \
-		-Wl,-version-script=$(srcdir)/libcoroipcc.versions \
-		$^ $(LDFLAGS) $(AM_LDFLAGS)
-	ln -sf libcoroipcc.so.$(SONAME) libcoroipcc.so
-	ln -sf libcoroipcc.so.$(SONAME) libcoroipcc.so.$(SOMAJOR)
-
-libconfdb.so.$(SONAME): confdb.o sa-confdb.o ../lcr/lcr_ifact.o libcoroipcc.so.$(SONAME)
-	$(CC) -shared -o $@ \
-		-Wl,-soname=libconfdb.so.$(SOMAJOR) \
-		-Wl,-version-script=$(srcdir)/libconfdb.versions \
-		$^ $(LDFLAGS) $(OS_DYFLAGS) $(OS_LDL) $(AM_LDFLAGS)
-	ln -sf libconfdb.so.$(SONAME) libconfdb.so
-	ln -sf libconfdb.so.$(SONAME) libconfdb.so.$(SOMAJOR)
-
-libcpg.so.$(CPG_SONAME): cpg.o libcoroipcc.so.$(SONAME)
-	$(CC) -shared -o $@ \
-		-Wl,-soname=libcpg.so.$(SOMAJOR) \
-		-Wl,-version-script=$(srcdir)/libcpg.versions \
-		$^ $(LDFLAGS) $(AM_LDFLAGS)
-	ln -sf $@ libcpg.so
-	ln -sf $@ libcpg.so.$(SOMAJOR)
-
-lib%.so.$(SONAME): %.o libcoroipcc.so.$(SONAME)
-	$(CC) -shared -o $@ \
-		-Wl,-soname=lib$*.so.$(SOMAJOR) \
-		-Wl,-version-script=$(srcdir)/lib$*.versions \
-		$^ $(LDFLAGS) $(AM_LDFLAGS)
-	ln -sf lib$*.so.$(SONAME) lib$*.so
-	ln -sf lib$*.so.$(SONAME) lib$*.so.$(SOMAJOR)
-
-endif
-
-endif
-
-all-local: $(SHARED_LIBS)
-	@echo Built shared libs
-
-install-exec-local:
-	$(INSTALL) -d $(DESTDIR)/$(libdir)
-	$(INSTALL) -m 755 $(SHARED_LIBS) $(DESTDIR)/$(libdir)
-	$(CP) -a $(SHARED_LIBS_SO) $(SHARED_LIBS_SO_TWO) $(DESTDIR)/$(libdir)
-
-uninstall-local:
-	cd $(DESTDIR)/$(libdir)/ && \
-		rm -f $(SHARED_LIBS) $(SHARED_LIBS_SO) $(SHARED_LIBS_SO_TWO)
-
-clean-local:
-	rm -f *.o *.a *.so* *.da *.bb *.bbg
+libcpg_la_SOURCES	= cpg.c
+libcfg_la_SOURCES	= cfg.c
+libquorum_la_SOURCES	= quorum.c
+libvotequorum_la_SOURCES= votequorum.c
+libcmap_la_SOURCES	= cmap.c
+libsam_la_SOURCES	= sam.c
+libsam_la_LIBADD	= libquorum.la libcmap.la

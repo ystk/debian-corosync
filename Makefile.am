@@ -33,59 +33,124 @@ SPEC			= $(PACKAGE_NAME).spec
 
 TARFILE			= $(PACKAGE_NAME)-$(VERSION).tar.gz
 
-EXTRA_DIST		= autogen.sh conf/corosync.conf.example $(SPEC).in
+EXTRA_DIST		= autogen.sh $(SPEC).in \
+			  build-aux/git-version-gen \
+			  build-aux/gitlog-to-changelog \
+			  build-aux/release.mk \
+			  .version
 
-AUTOMAKE_OPTIONS	= foreign
+ACLOCAL_AMFLAGS		= -I m4
 
 MAINTAINERCLEANFILES	= Makefile.in aclocal.m4 configure depcomp \
 			  config.guess config.sub missing install-sh \
-			  autoheader automake autoconf
+			  autoheader automake autoconf test_lense.sh \
+			  autoscan.log configure.scan ltmain.sh test-driver
 
-dist_doc_DATA		= LICENSE INSTALL README.devmap \
-			  README.recovery SECURITY TODO AUTHORS
+dist_doc_DATA		= LICENSE INSTALL README.recovery SECURITY AUTHORS
 
-corosysconfdir		= ${COROSYSCONFDIR}
+SUBDIRS			= include common_lib lib exec tools test cts pkgconfig \
+			  man init conf qdevices
 
-corosysconf_DATA	= conf/corosync.conf.example
+coverity:
+	rm -rf cov
+	make clean
+	cov-build --dir=cov make
+	cov-analyze --dir cov \
+		    --concurrency \
+		    -co BAD_FREE:allow_first_field:true \
+		    --security \
+		    --wait-for-license
+	cov-format-errors --dir cov
 
-SUBDIRS			= include lcr lib exec services tools test pkgconfig \
-			  man init
+coverity-aggressive:
+	rm -rf cov
+	make clean
+	cov-build --dir=cov make
+	cov-analyze --dir cov \
+		    --concurrency \
+		    --all \
+		    --aggressiveness-level high \
+		    --security \
+		    --wait-for-license
+	cov-format-errors --dir cov
 
 install-exec-local:
 	$(INSTALL) -d $(DESTDIR)/${COROSYSCONFDIR}/service.d
 	$(INSTALL) -d $(DESTDIR)/${COROSYSCONFDIR}/uidgid.d
 	$(INSTALL) -d $(DESTDIR)/${localstatedir}/lib/corosync
-	$(INSTALL) -d $(DESTDIR)/${SOCKETDIR}
+	$(INSTALL) -d $(DESTDIR)/${localstatedir}/log/cluster
 
 uninstall-local:
 	rmdir $(DESTDIR)/${COROSYSCONFDIR}/service.d || :;
 	rmdir $(DESTDIR)/${COROSYSCONFDIR}/uidgid.d || :;
 	rmdir $(DESTDIR)/${localstatedir}/lib/corosync || :;
-	rmdir $(DESTDIR)/${SOCKETDIR} || :;
+	rmdir $(DESTDIR)/${localstatedir}/log/cluster || :;
+
+if AUGTOOL
+check_SCRIPTS = test_lense.sh
+TESTS = $(check_SCRIPTS)
+
+test_lense.sh:
+	echo "augparse -I $(srcdir)/conf/lenses/ $(srcdir)/conf/lenses/tests/test_corosync.aug" > $@
+	chmod +x $@
+
+endif
 
 lint:
-	for dir in lcr lib exec services tools test; do make -C $$dir lint; done
+	for dir in lib exec tools test; do make -C $$dir lint; done
 
+.PHONY: doxygen
 doxygen:
-	mkdir -p doc/api && doxygen
+	@if [ "$(DOXYGEN)" = "" ] || [ "$(DOT)" = "" ] ; then \
+		echo "*********************************************" ; \
+		echo "***                                       ***" ; \
+		echo "*** You must install doxygen and graphviz ***" ; \
+		echo "*** to generate the API documentation.    ***" ; \
+		echo "***                                       ***" ; \
+		echo "*********************************************" ; \
+		exit 1 ; \
+	else \
+		mkdir -p doc/api && $(DOXYGEN) ; \
+	fi
 
 dist-clean-local:
-	rm -f autoconf automake autoheader
+	rm -f autoconf automake autoheader test_lense.sh
 
 clean-generic:
-	rm -rf doc/api $(SPEC) $(TARFILE) 
+	rm -rf doc/api $(SPEC) $(TARFILE) test_lense.sh
 
 ## make rpm/srpm section.
 
 $(SPEC): $(SPEC).in
 	rm -f $@-t $@
-	LC_ALL=C date="$(shell date "+%a %b %d %Y")" && \
-	alphatag="$(shell svnversion | sed -e "s#.*:##g" -e "s#[MS]##g")" && \
+	date="$(shell LC_ALL=C date "+%a %b %d %Y")" && \
+	if [ -f .tarball-version ]; then \
+		gitver="$(shell cat .tarball-version)" && \
+		rpmver=$$gitver && \
+		alphatag="" && \
+		dirty="" && \
+		numcomm=""; \
+	else \
+		gitver="$(shell git describe --abbrev=4 --match='v*' HEAD 2>/dev/null)" && \
+		rpmver=`echo $$gitver | sed -e "s/^v//" -e "s/-.*//g"` && \
+		alphatag=`echo $$gitver | sed -e "s/.*-//" -e "s/^g//"` && \
+		vtag=`echo $$gitver | sed -e "s/-.*//g"` && \
+		numcomm=`git rev-list $$vtag..HEAD | wc -l` && \
+		git update-index --refresh > /dev/null 2>&1 || true && \
+		dirty=`git diff-index --name-only HEAD 2>/dev/null`; \
+	fi && \
+	if [ "$$numcomm" = "0" ]; then numcomm=""; fi && \
+	if [ -n "$$numcomm" ]; then numcomm="%global numcomm $$numcomm"; fi && \
+	if [ "$$alphatag" = "$$gitver" ]; then alphatag=""; fi && \
+	if [ -n "$$alphatag" ]; then alphatag="%global alphatag $$alphatag"; fi && \
+	if [ -n "$$dirty" ]; then dirty="%global dirty dirty"; fi && \
 	sed \
-		-e "s#@alphatag@#r$$alphatag#g" \
-		-e "s#@version@#$(VERSION)#g" \
+		-e "s#@version@#$$rpmver#g" \
+		-e "s#@ALPHATAG@#$$alphatag#g" \
+		-e "s#@NUMCOMM@#$$numcomm#g" \
+		-e "s#@DIRTY@#$$dirty#g" \
 		-e "s#@date@#$$date#g" \
-	$< > $@-t
+	$< > $@-t; \
 	chmod a-w $@-t
 	mv $@-t $@
 
@@ -100,8 +165,33 @@ RPMBUILDOPTS	= --define "_sourcedir $(abs_builddir)" \
 
 srpm: clean
 	$(MAKE) $(SPEC) $(TARFILE)
-	rpmbuild $(RPMBUILDOPTS) --nodeps -bs $(SPEC)
+	rpmbuild $(WITH_LIST) $(RPMBUILDOPTS) --nodeps -bs $(SPEC)
 
-rpm: clean
+rpm: clean _version
 	$(MAKE) $(SPEC) $(TARFILE)
-	rpmbuild $(RPMBUILDOPTS) -ba $(SPEC)
+	rpmbuild $(WITH_LIST) $(RPMBUILDOPTS) -ba $(SPEC)
+
+# release/versioning
+BUILT_SOURCES	= .version
+.version:
+	echo $(VERSION) > $@-t && mv $@-t $@
+
+dist-hook: gen-ChangeLog
+	echo $(VERSION) > $(distdir)/.tarball-version
+
+gen_start_date = 2000-01-01
+.PHONY: gen-ChangeLog _version
+gen-ChangeLog:
+	if test -d .git; then						\
+		LC_ALL=C $(top_srcdir)/build-aux/gitlog-to-changelog		\
+			--since=$(gen_start_date) > $(distdir)/cl-t;	\
+		rm -f $(distdir)/ChangeLog;				\
+		mv $(distdir)/cl-t $(distdir)/ChangeLog;		\
+	fi
+
+_version:
+	cd $(srcdir) && rm -rf autom4te.cache .version && autoreconf -i
+	$(MAKE) $(AM_MAKEFLAGS) Makefile
+
+maintainer-clean-local:
+	rm -rf m4

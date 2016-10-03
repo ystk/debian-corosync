@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2007, 2009 Red Hat, Inc.
+ * Copyright (c) 2006-2011 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -32,16 +32,20 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
+
+/**
+ * @file
+ * Totem Single Ring Protocol
+ *
+ * depends on poll abstraction, POSIX, IPV4
+ */
+
 #ifndef TOTEMMRP_H_DEFINED
 #define TOTEMMRP_H_DEFINED
 
 #include <corosync/totem/totem.h>
 
-/*
- * Totem Single Ring Protocol
- * depends on poll abstraction, POSIX, IPV4
- */
-/*
+/**
  * Initialize the logger
  */
 extern void totemmrp_log_printf_init (
@@ -52,11 +56,11 @@ extern void totemmrp_log_printf_init (
 	int log_level_notice,
 	int log_level_debug);
 
-/*
+/**
  * Initialize the group messaging interface
  */
 extern int totemmrp_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t *poll_handle,
 	struct totem_config *totem_config,
 	totempg_stats_t *stats,
 
@@ -70,11 +74,13 @@ extern int totemmrp_initialize (
 		const unsigned int *member_list, size_t member_list_entries,
 		const unsigned int *left_list, size_t left_list_entries,
 		const unsigned int *joined_list, size_t joined_list_entries,
-		const struct memb_ring_id *ring_id));
+		const struct memb_ring_id *ring_id),
+	void (*waiting_trans_ack_cb_fn) (
+		int waiting_trans_ack));
 
 extern void totemmrp_finalize (void);
 
-/*
+/**
  * Multicast a message
  */
 extern int totemmrp_mcast (
@@ -82,7 +88,7 @@ extern int totemmrp_mcast (
 	unsigned int iov_len,
 	int priority);
 
-/*
+/**
  * Return number of available messages that can be queued
  */
 extern int totemmrp_avail (void);
@@ -102,6 +108,7 @@ extern void totemmrp_event_signal (enum totem_event_type type, int value);
 extern int totemmrp_ifaces_get (
 	unsigned int nodeid,
 	struct totem_ip_address *interfaces,
+	unsigned int interfaces_size,
 	char ***status,
 	unsigned int *iface_count);
 
@@ -109,11 +116,23 @@ extern unsigned int totemmrp_my_nodeid_get (void);
 
 extern int totemmrp_my_family_get (void);
 
-extern int totemmrp_crypto_set (unsigned int);
+extern int totemmrp_crypto_set (const char *cipher_type, const char *hash_type);
 
 extern int totemmrp_ring_reenable (void);
 
 extern void totemmrp_service_ready_register (
         void (*totem_service_ready) (void));
+
+extern int totemmrp_member_add (
+	const struct totem_ip_address *member,
+	int ring_no);
+
+extern int totemmrp_member_remove (
+	const struct totem_ip_address *member,
+	int ring_no);
+
+void totemmrp_threaded_mode_enable (void);
+
+void totemmrp_trans_ack (void);
 
 #endif /* TOTEMMRP_H_DEFINED */

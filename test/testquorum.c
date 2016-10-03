@@ -35,10 +35,11 @@ int main(int argc, char *argv[])
 {
 	int quorate;
 	quorum_callbacks_t callbacks;
+	uint32_t quorum_type;
 	int err;
 
 	callbacks.quorum_notify_fn = quorum_notification_fn;
-	if ( (err=quorum_initialize(&g_handle, &callbacks)) != CS_OK)
+	if ( (err=quorum_initialize(&g_handle, &callbacks, &quorum_type)) != CS_OK)
 		fprintf(stderr, "quorum_initialize FAILED: %d\n", err);
 
 	if ( (err=quorum_trackstart(g_handle, CS_TRACK_CHANGES)) != CS_OK)
@@ -54,7 +55,10 @@ int main(int argc, char *argv[])
 	printf("-------------------\n");
 
 	while (1)
-		quorum_dispatch(g_handle, CS_DISPATCH_ALL);
+		if (quorum_dispatch(g_handle, CS_DISPATCH_ALL) != CS_OK) {
+			fprintf(stderr, "Error from quorum_dispatch\n");
+			return -1;
+		}
 
 	return 0;
 }

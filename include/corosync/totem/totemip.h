@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2007, 2009 Red Hat, Inc.
+ * Copyright (c) 2005-2010 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -37,8 +37,11 @@
 #ifndef TOTEMIP_H_DEFINED
 #define TOTEMIP_H_DEFINED
 
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <stdint.h>
+#include <corosync/list.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,10 +67,20 @@ struct totem_ip_address
 	unsigned char  addr[TOTEMIP_ADDRLEN];
 } __attribute__((packed));
 
+struct totem_ip_if_address
+{
+	struct totem_ip_address ip_addr;
+	struct totem_ip_address mask_addr;
+	int interface_up;
+	int interface_num;
+	char *name;
+	struct list_head list;
+};
 
 extern int totemip_equal(const struct totem_ip_address *addr1,
 			 const struct totem_ip_address *addr2);
 extern int totemip_compare(const void *a, const void *b);
+extern int totemip_is_mcast(struct totem_ip_address *addr);
 extern void totemip_copy(struct totem_ip_address *addr1,
 			 const struct totem_ip_address *addr2);
 extern void totemip_copy_endian_convert(struct totem_ip_address *addr1,
@@ -87,6 +100,10 @@ extern int totemip_iface_check(struct totem_ip_address *bindnet,
 			       int *interface_num,
 			       int mask_high_bit);
 
+extern int totemip_getifaddrs(struct list_head *addrs);
+
+extern void totemip_freeifaddrs(struct list_head *addrs);
+
 /* These two simulate a zero in_addr by clearing the family field */
 static inline void totemip_zero_set(struct totem_ip_address *addr)
 {
@@ -96,6 +113,8 @@ static inline int totemip_zero_check(const struct totem_ip_address *addr)
 {
 	return (addr->family == 0);
 }
+
+extern size_t totemip_udpip_header_size(int family);
 
 #ifdef __cplusplus
 }

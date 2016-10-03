@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2009 Red Hat, Inc.
+ * Copyright (c) 2006-2013 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -51,7 +51,21 @@
 #include <corosync/totem/totem.h>
 #include <corosync/cfg.h>
 
-static void ringstatusget_do (void)
+#define cs_repeat(result, max, code)				\
+	do {							\
+		int counter = 0;				\
+		do {						\
+			result = code;				\
+			if (result == CS_ERR_TRY_AGAIN) {	\
+				sleep(1);			\
+				counter++;			\
+			} else {				\
+				break;				\
+			}					\
+		} while (counter < max);			\
+	} while (0)
+
+static int ringstatusget_do (char *interface_name)
 {
 	cs_error_t result;
 	corosync_cfg_handle_t handle;
@@ -60,6 +74,7 @@ static void ringstatusget_do (void)
 	char **interface_status;
 	unsigned int i;
 	unsigned int nodeid;
+	int rc = 0;
 
 	printf ("Printing ring status.\n");
 	result = corosync_cfg_initialize (&handle, NULL);
@@ -73,7 +88,7 @@ static void ringstatusget_do (void)
 		printf ("Could not get the local node id, the error is: %d\n", result);
 	}
 	else {
-		printf ("Local node ID %d\n", nodeid);
+		printf ("Local node ID %u\n", nodeid);
 	}
 
 	result = corosync_cfg_ring_status_get (handle,
@@ -84,12 +99,22 @@ static void ringstatusget_do (void)
 		printf ("Could not get the ring status, the error is: %d\n", result);
 	} else {
 		for (i = 0; i < interface_count; i++) {
-			printf ("RING ID %d\n", i);
-			printf ("\tid\t= %s\n", interface_names[i]);
-			printf ("\tstatus\t= %s\n", interface_status[i]);
+			if ( (interface_name && 
+			     	(interface_name[0]=='\0' || 
+				strcasecmp (interface_name, interface_names[i]) == 0)) ||
+				!interface_name ) {
+
+				printf ("RING ID %d\n", i);
+				printf ("\tid\t= %s\n", interface_names[i]);
+				printf ("\tstatus\t= %s\n", interface_status[i]);
+				if (strstr(interface_status[i], "FAULTY")) {
+					rc = 1;
+				}
+			}
 		}
 	}
 	(void)corosync_cfg_finalize (handle);
+	return rc;
 }
 
 static void ringreenable_do (void)
@@ -106,46 +131,39 @@ static void ringreenable_do (void)
 
 	result = corosync_cfg_ring_reenable (handle);
 	if (result != CS_OK) {
-		printf ("Could not reenable ring error %d\n", result);
+		printf ("Could not re-enable ring error %d\n", result);
 	}
 
 	(void)corosync_cfg_finalize (handle);
 }
 
-static void service_load_do (const char *service, unsigned int version)
+static int reload_config_do (void)
 {
 	cs_error_t result;
 	corosync_cfg_handle_t handle;
+	int rc;
 
-	printf ("Loading service '%s' version '%d'\n", service, version);
+	rc = 0;
+
+	printf ("Reloading corosync.conf...\n");
 	result = corosync_cfg_initialize (&handle, NULL);
 	if (result != CS_OK) {
-		printf ("Could not initialize corosync configuration API error %d\n", result);
+		printf ("Could not initialize corosync configuration API error %s\n", cs_strerror(result));
 		exit (1);
 	}
-	result = corosync_cfg_service_load (handle, service, version);
-	if (result != CS_OK) {
-		printf ("Could not load service (error = %d)\n", result);
-	}
-	(void)corosync_cfg_finalize (handle);
-}
 
-static void service_unload_do (const char *service, unsigned int version)
-{
-	cs_error_t result;
-	corosync_cfg_handle_t handle;
+	result = corosync_cfg_reload_config (handle);
+	if (result != CS_OK) {
+		printf ("Could not reload configuration. Error %s\n", cs_strerror(result));
+		rc = (int)result;
+	}
+	else {
+		printf ("Done\n");
+	}
 
-	printf ("Unloading service '%s' version '%d'\n", service, version);
-	result = corosync_cfg_initialize (&handle, NULL);
-	if (result != CS_OK) {
-		printf ("Could not initialize corosync configuration API error %d\n", result);
-		exit (1);
-	}
-	result = corosync_cfg_service_unload (handle, service, version);
-	if (result != CS_OK) {
-		printf ("Could not unload service (error = %d)\n", result);
-	}
 	(void)corosync_cfg_finalize (handle);
+
+	return (rc);
 }
 
 static void shutdown_do(void)
@@ -163,7 +181,7 @@ static void shutdown_do(void)
 	}
 
 	printf ("Shutting down corosync\n");
-	result = corosync_cfg_try_shutdown (handle, COROSYNC_CFG_SHUTDOWN_FLAG_REQUEST);
+	cs_repeat(result, 30, corosync_cfg_try_shutdown (handle, COROSYNC_CFG_SHUTDOWN_FLAG_REQUEST));
 	if (result != CS_OK) {
 		printf ("Could not shutdown (error = %d)\n", result);
 	}
@@ -201,6 +219,9 @@ static void showaddrs_do(int nodeid)
 				saddr = &sin->sin_addr;
 
 			inet_ntop(ss->ss_family, saddr, buf, sizeof(buf));
+			if (i != 0) {
+				printf(" ");
+			}
 			printf("%s", buf);
 		}
 		printf("\n");
@@ -210,25 +231,6 @@ static void showaddrs_do(int nodeid)
 	(void)corosync_cfg_finalize (handle);
 }
 
-
-static void crypto_do(unsigned int type)
-{
-	cs_error_t result;
-	corosync_cfg_handle_t handle;
-
-	printf ("Setting crypto to mode %d\n", type);
-	result = corosync_cfg_initialize (&handle, NULL);
-	if (result != CS_OK) {
-		printf ("Could not initialize corosync configuration API error %d\n", result);
-		exit (1);
-	}
-	result = corosync_cfg_crypto_set (handle, type);
-	if (result != CS_OK) {
-		printf ("Could not set crypto mode (error = %d)\n", result);
-	}
-	(void)corosync_cfg_finalize (handle);
-
-}
 
 static void killnode_do(unsigned int nodeid)
 {
@@ -251,58 +253,41 @@ static void killnode_do(unsigned int nodeid)
 
 static void usage_do (void)
 {
-	printf ("corosync-cfgtool [-s] [-r] [-l] [-u] [-H] [service_name] [-v] [version] [-k] [nodeid] [-a] [nodeid]\n\n");
+	printf ("corosync-cfgtool [-i <interface ip>] -s] [-r] [-H] [service_name] [-k] [nodeid] [-a] [nodeid]\n\n");
 	printf ("A tool for displaying and configuring active parameters within corosync.\n");
 	printf ("options:\n");
 	printf ("\t-s\tDisplays the status of the current rings on this node.\n");
 	printf ("\t-r\tReset redundant ring state cluster wide after a fault to\n");
 	printf ("\t\tre-enable redundant ring operation.\n");
-	printf ("\t-l\tLoad a service identified by name.\n");
-	printf ("\t-u\tUnload a service identified by name.\n");
 	printf ("\t-a\tDisplay the IP address(es) of a node\n");
-	printf ("\t-c\tSet the cryptography mode of cluster communications\n");
 	printf ("\t-k\tKill a node identified by node id.\n");
+	printf ("\t-R\tReload corosync.conf on all nodes.\n");
 	printf ("\t-H\tShutdown corosync cleanly on this node.\n");
 }
 
-static char *
-xstrdup (char const *s)
-{
-	char *p = strdup (s);
-	if (p)
-		return (char *) p;
-
-	printf ("exhausted virtual memory\n");
-	exit (1);
-}
-
 int main (int argc, char *argv[]) {
-	const char *options = "srl:u:v:k:a:c:hH";
+	const char *options = "i:srRk:a:hH";
 	int opt;
-	int service_load = 0;
 	unsigned int nodeid;
-	int service_unload = 0;
-	char *service = NULL;
-	unsigned int version = 0;
+	char interface_name[128] = "";
+	int rc=0;
 
 	if (argc == 1) {
 		usage_do ();
 	}
 	while ( (opt = getopt(argc, argv, options)) != -1 ) {
 		switch (opt) {
+		case 'i':
+			strncpy(interface_name, optarg, sizeof(interface_name));
+			break;
 		case 's':
-			ringstatusget_do ();
+			rc = ringstatusget_do (interface_name);
+			break;
+		case 'R':
+			rc = reload_config_do ();
 			break;
 		case 'r':
 			ringreenable_do ();
-			break;
-		case 'l':
-			service_load = 1;
-			service = xstrdup (optarg);
-			break;
-		case 'u':
-			service_unload = 1;
-			service = xstrdup (optarg);
 			break;
 		case 'k':
 			nodeid = atoi (optarg);
@@ -314,24 +299,11 @@ int main (int argc, char *argv[]) {
 		case 'a':
 			showaddrs_do( atoi(optarg) );
 			break;
-		case 'c':
-			crypto_do( atoi(optarg) );
-			break;
-		case 'v':
-			version = atoi (optarg);
-			break;
 		case 'h':
 			usage_do();
 			break;
 		}
 	}
 
-	if (service_load) {
-		service_load_do (service, version);
-	} else
-	if (service_unload) {
-		service_unload_do (service, version);
-	}
-
-	return (0);
+	return (rc);
 }

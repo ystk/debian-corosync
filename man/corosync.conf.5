@@ -1,6 +1,6 @@
 .\"/*
 .\" * Copyright (c) 2005 MontaVista Software, Inc.
-.\" * Copyright (c) 2006-2009 Red Hat, Inc.
+.\" * Copyright (c) 2006-2012 Red Hat, Inc.
 .\" *
 .\" * All rights reserved.
 .\" *
@@ -32,12 +32,12 @@
 .\" * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 .\" * THE POSSIBILITY OF SUCH DAMAGE.
 .\" */
-.TH COROSYNC_CONF 5 2006-03-28 "corosync Man Page" "Corosync Cluster Engine Programmer's Manual"
+.TH COROSYNC_CONF 5 2012-10-10 "corosync Man Page" "Corosync Cluster Engine Programmer's Manual"
 .SH NAME
 corosync.conf - corosync executive configuration file
 
 .SH SYNOPSIS
-/etc/corosync.conf
+/etc/corosync/corosync.conf
 
 .SH DESCRIPTION
 The corosync.conf instructs the corosync executive about various parameters
@@ -52,20 +52,14 @@ This top level directive contains configuration options for the totem protocol.
 logging { }
 This top level directive contains configuration options for logging.
 .TP
-event { }
-This top level directive contains configuration options for the event service.
-
-.PP
-.PP
-It is also possible to specify the top level parameter
-.B compatibility.
-This directive indicates the level of compatibility requested by the user.  The
-option whitetank can be specified to remain backward compatable with
-openais-0.80.z.  The option none can be specified to only be compatable
-with corosync-1.Y.Z.  Extra processing during configuration changes is
-required to remain backward compatable.
-
-The default is whitetank. (backwards compatibility)
+quorum { }
+This top level directive contains configuration options for quorum.
+.TP
+nodelist { }
+This top level directive contains configuration options for nodes in cluster.
+.TP
+qb { }
+This top level directive contains configuration options related to libqb.
 
 .PP
 .PP
@@ -77,7 +71,8 @@ option which is required:
 .PP
 Within the
 .B interface
-sub-directive of totem there are four parameters which are required:
+sub-directive of totem there are four parameters which are required.  There is
+one parameter which is optional.
 
 .TP
 ringnumber
@@ -88,15 +83,22 @@ ring. The ringnumber must start at 0.
 
 .TP
 bindnetaddr
-This specifies the address which the corosync executive should bind.
-This address should always end in zero.  If the totem traffic should
-be routed over 192.168.5.92, set bindnetaddr to 192.168.5.0.
+This specifies the network address the corosync executive should bind
+to.
+
+bindnetaddr should be an IP address configured on the system, or a network
+address.
+
+For example, if the local interface is 192.168.5.92 with netmask
+255.255.255.0, you should set bindnetaddr to 192.168.5.92 or 192.168.5.0.
+If the local interface is 192.168.5.92 with netmask 255.255.255.192,
+set bindnetaddr to 192.168.5.92 or 192.168.5.64, and so forth.
 
 This may also be an IPV6 address, in which case IPV6 networking will be used.
-In this case, the full address must be specified and there is no automatic
+In this case, the exact address must be specified and there is no automatic
 selection of the network interface within a specific subnet as with IPv4.
 
-If IPv6 networking is used, the nodeid field must be specified.
+If IPv6 networking is used, the nodeid field in nodelist must be specified.
 
 .TP
 broadcast
@@ -112,13 +114,28 @@ about a multicast address to use.  Avoid 224.x.x.x because this is a "config"
 multicast address.
 
 This may also be an IPV6 multicast address, in which case IPV6 networking
-will be used.  If IPv6 networking is used, the nodeid field must be specified.
+will be used.  If IPv6 networking is used, the nodeid field in nodelist must
+be specified.
+
+It's not needed to use this option if cluster_name option is used. If both options
+are used, mcastaddr has higher priority.
 
 .TP
 mcastport
 This specifies the UDP port number.  It is possible to use the same multicast
 address on a network with the corosync services configured for different
 UDP ports.
+Please note corosync uses two UDP ports mcastport (for mcast receives) and 
+mcastport - 1 (for mcast sends).
+If you have multiple clusters on the same network using the same mcastaddr 
+please configure the mcastports with a gap.
+
+.TP
+ttl
+This specifies the Time To Live (TTL). If you run your cluster on a routed
+network then the default of "1" will be too small. This option provides
+a way to increase this up to 255. The valid range is 0..255.
+Note that this is only valid on multicast transport types.
 
 .PP
 .PP
@@ -129,8 +146,8 @@ five are optional, and one is required when IPV6 is configured in the interface
 subdirective.  The required directive controls the version of the totem
 configuration.  The optional option unless using IPV6 directive controls
 identification of the processor.  The optional options control secrecy and
-authentication, the redundant ring mode of operation, maximum network MTU,
-and number of sending threads, and the nodeid field.
+authentication, the redundant ring mode of operation and maximum network MTU
+field.
 
 .TP
 version
@@ -138,21 +155,10 @@ This specifies the version of the configuration file.  Currently the only
 valid version for this directive is 2.
 
 .PP
-.PP
-.TP
-nodeid
-This configuration option is optional when using IPv4 and required when using
-IPv6.  This is a 32 bit value specifying the node identifier delivered to the
-cluster membership service.  If this is not specified with IPv4, the node id
-will be determined from the 32 bit IP address the system to which the system
-is bound with ring identifier of 0.  The node identifier value of zero is
-reserved and should not be used.
-
-.TP
 clear_node_high_bit
 This configuration option is optional and is only relevant when no nodeid is
-specified.  Some openais clients require a signed 32 bit nodeid that is greater
-than zero however by default openais uses all 32 bits of the IPv4 address space
+specified.  Some corosync clients require a signed 32 bit nodeid that is greater
+than zero however by default corosync uses all 32 bits of the IPv4 address space
 when generating a nodeid.  Set this option to yes to force the high bit to be
 zero and therefor ensure the nodeid is a positive signed 32 bit integer.
 
@@ -160,34 +166,43 @@ WARNING: The clusters behavior is undefined if this option is enabled on only
 a subset of the cluster (for example during a rolling upgrade).
 
 .TP
+crypto_hash
+This specifies which HMAC authentication should be used to authenticate all
+messages. Valid values are none (no authentication), md5, sha1, sha256,
+sha384 and sha512.
+
+The default is sha1.
+
+.TP
+crypto_cipher
+This specifies which cipher should be used to encrypt all messages.
+Valid values are none (no encryption), aes256, aes192, aes128 and 3des.
+Enabling crypto_cipher, requires also enabling of crypto_hash.
+
+The default is aes256.
+
+.TP
 secauth
 This specifies that HMAC/SHA1 authentication should be used to authenticate
 all messages.  It further specifies that all data should be encrypted with the
-sober128 encryption algorithm to protect data from eavesdropping.
+nss library and aes256 encryption algorithm to protect data from eavesdropping.
 
-Enabling this option adds a 36 byte header to every message sent by totem which
-reduces total throughput.  Encryption and authentication consume 75% of CPU
-cycles in aisexec as measured with gprof when enabled.
-
-For 100mbit networks with 1500 MTU frame transmissions:
-A throughput of 9mb/sec is possible with 100% cpu utilization when this
-option is enabled on 3ghz cpus.
-A throughput of 10mb/sec is possible wth 20% cpu utilization when this
-optin is disabled on 3ghz cpus.
-
-For gig-e networks with large frame transmissions:
-A throughput of 20mb/sec is possible when this option is enabled on
-3ghz cpus.
-A throughput of 60mb/sec is possible when this option is disabled on
-3ghz cpus.
+Enabling this option adds a encryption header to every message sent by totem which
+reduces total throughput. Also encryption and authentication consume extra CPU
+cycles in corosync.
 
 The default is on.
+
+WARNING: This parameter is deprecated. It's recomended to use combination of
+crypto_cipher and crypto_hash.
 
 .TP
 rrp_mode
 This specifies the mode of redundant ring, which may be none, active, or
-passive.  Active replication offers slightly lower latency from transmit
-to delivery in faulty network environments but with less performance.
+passive.  Currently only 'passive' is supported or tested
+(using  'active'  is  not recommended). Active replication offers
+slightly lower latency from transmit to delivery in faulty network
+environments but with less performance.
 Passive replication may nearly double the speed of the totem protocol
 if the protocol doesn't become cpu bound.  The final option is none, in
 which case only one network interface will be used to operate the totem
@@ -196,6 +211,13 @@ protocol.
 If only one interface directive is specified, none is automatically chosen.
 If multiple interface directives are specified, only active or passive may
 be chosen.
+
+The maximum number of interface directives that is allowed for either 
+modes (active or passive) is 2.
+
+When using multiple interfaces, make sure to use different multicast
+address/port (port for same address must differ by at least two) pair
+for each interface (this is checked by parser) to make rrp works.
 
 .TP
 netmtu
@@ -214,10 +236,6 @@ of 8982 seems to work for the few large frame devices that have been tested.
 Some manufacturers claim large frame support when in fact they support frame
 sizes of 4500 bytes.
 
-Increasing the MTU from 1500 to 8982 doubles throughput performance from 30MB/sec
-to 60MB/sec as measured with evsbench with 175000 byte messages with the secauth
-directive set to off.
-
 When sending multicast traffic, if the network frequently reconfigures, chances are
 that some device in the network doesn't support large frames.
 
@@ -226,37 +244,36 @@ Choose hardware carefully if intending to use large frame support.
 The default is 1500.
 
 .TP
-threads
-This directive controls how many threads are used to encrypt and send multicast
-messages.  If secauth is off, the protocol will never use threaded sending.
-If secauth is on, this directive allows systems to be configured to use
-multiple threads to encrypt and send multicast messages.
-
-A thread directive of 0 indicates that no threaded send should be used.  This
-mode offers best performance for non-SMP systems.
-
-The default is 0.
-
-.TP
-vsftype
-This directive controls the virtual synchrony filter type used to identify
-a primary component.  The preferred choice is YKD dynamic linear voting,
-however, for clusters larger then 32 nodes YKD consumes alot of memory.  For
-large scale clusters that are created by changing the MAX_PROCESSORS_COUNT
-#define in the C code totem.h file, the virtual synchrony filter "none" is
-recommended but then AMF and DLCK services (which are currently experimental)
-are not safe for use.
-
-The default is ykd.  The vsftype can also be set to none.
-
-.TP
 transport
 This directive controls the transport mechanism used.  If the interface to
-which corosync is binding is Infiniband, you can specify the "iba" option.  Any
-other option is ignored.  Note Infiniband interfaces will use RDMA transport
-techniques and perform at higher bandwidths and lower latency than gige networks.
+which corosync is binding is an RDMA interface such as RoCEE or Infiniband, the
+"iba" parameter may be specified.  To avoid the use of multicast entirely, a
+unicast transport parameter "udpu" can be specified.  This requires specifying
+the list of members in nodelist directive, that could potentially make up
+the membership before deployment.
 
-The default is udp.  The transport type can also be set to iba.
+The default is udp.  The transport type can also be set to udpu or iba.
+
+.TP
+cluster_name
+This specifies the name of cluster and it's used for automatic generating
+of multicast address.
+
+.TP
+config_version
+This specifies version of config file. This is converted to unsigned 64-bit int.
+By default it's 0. Option is used to prevent joining old nodes with not
+up-to-date configuration. If value is not 0, and node is going for first time
+(only for first time, join after split doesn't follow this rules)
+from single-node membership to multiple nodes membership, other nodes
+config_versions are collected. If current node config_version is not
+equal to highest of collected versions, corosync is terminated.
+
+.TP
+ip_version
+Specifies version of IP to use for communication. Value can be one of
+ipv4 or ipv6. Default (if unspecified) is ipv4.
+
 
 Within the
 .B totem
@@ -269,12 +286,30 @@ by reducing the token timeout.
 
 .TP
 token
-This timeout specifies in milliseconds until a token loss is declared after not
+This timeout is used directly or as a base for real token timeout calculation (explained in
+.B token_coefficient
+section). Token timeout specifies in milliseconds until a token loss is declared after not
 receiving a token.  This is the time spent detecting a failure of a processor
 in the current configuration.  Reforming a new configuration takes about 50
 milliseconds in addition to this timeout.
 
+For real token timeout used by totem it's possible to read cmap value of
+.B runtime.config.token
+key.
+
 The default is 1000 milliseconds.
+
+.TP
+token_coefficient
+This value is used only when
+.B nodelist
+section is specified and contains at least 3 nodes. If so, real token timeout
+is then computed as token + (number_of_nodes - 2) * token_coefficient.
+This allows cluster to scale without manually changing token timeout
+every time new node is added. This value can be set to 0 resulting
+in effective removal of this feature.
+
+The default is 650 milliseconds.
 
 .TP
 token_retransmit
@@ -327,6 +362,12 @@ achieved before starting a new round of membership configuration.  The minimum
 value for consensus must be 1.2 * token.  This value will be automatically
 calculated at 1.2 * token if the user doesn't specify a consensus value.
 
+For two node clusters, a consensus larger then the join timeout but less then
+token is safe.  For three node or larger clusters, consensus should be larger
+then token.  There is an increasing risk of odd membership changes, which stil
+guarantee virtual synchrony,  as node count grows if consensus is less than
+token.
+
 The default is 1200 milliseconds.
 
 .TP
@@ -346,17 +387,17 @@ that a network interface is back up after it has been downed.
 The default is 1000 millseconds.
 
 .TP
-fail_to_recv_const
+fail_recv_const
 This constant specifies how many rotations of the token without receiving any
 of the messages when messages should be received may occur before a new
 configuration is formed.
 
-The default is 50 failures to receive a message.
+The default is 2500 failures to receive a message.
 
 .TP
 seqno_unchanged_const
 This constant specifies how many rotations of the token without any multicast
-traffic should occur before the merge detection timeout is started.
+traffic should occur before the hold timer is started.
 
 The default is 30 rotations.
 
@@ -382,7 +423,7 @@ max_network_delay
 [HeartBeating mechanism]
 This constant specifies in milliseconds the approximate delay that your network takes
 to transport one packet from one machine to another. This value is to be set by system
-engineers and please dont change if not sure as this effects the failure detection
+engineers and please don't change if not sure as this effects the failure detection
 mechanism using heartbeat.
 
 The default is 50 milliseconds.
@@ -410,6 +451,16 @@ processor on receipt of the token.  The max_messages parameter is limited to
 The default is 17 messages.
 
 .TP
+miss_count_const
+This constant defines the maximum number of times on receipt of a token
+a message is checked for retransmission before a retransmission occurs.  This
+parameter is useful to modify for switches that delay multicast packets
+compared to unicast packets.  The default setting works well for nearly all
+modern switches.
+
+The default is 5 messages.
+
+.TP
 rrp_problem_count_timeout
 This specifies the time in milliseconds to wait before decrementing the
 problem count by 1 for a particular ring to ensure a link is not marked
@@ -433,6 +484,14 @@ may occur.
 The default is 10 problem counts.
 
 .TP
+rrp_problem_count_mcast_threshold
+This specifies the number of times a problem is detected with multicast before
+setting the link faulty for passive rrp mode. This variable is unused in active
+rrp mode.
+
+The default is 10 times rrp_problem_count_threshold.
+
+.TP
 rrp_token_expired_timeout
 This specifies the time in milliseconds to increment the problem counter for
 the redundant ring protocol after not having received a token from all rings
@@ -443,6 +502,13 @@ problem_count_threshold but may be overridden.  It is not recommended to
 override this value without guidance from the corosync community.
 
 The default is 47 milliseconds.
+
+.TP
+rrp_autorecovery_check_timeout
+This specifies the time in milliseconds to check if the failed ring can be
+auto-recovered.
+
+The default is 1000 milliseconds.
 
 .PP
 Within the
@@ -472,7 +538,7 @@ The default is off.
 
 .PP
 The following options are valid both for top level logging directive
-and they can be overriden in logger_subsys entries.
+and they can be overridden in logger_subsys entries.
 
 .TP
 to_stderr
@@ -493,11 +559,10 @@ with the option
 .B
 copytruncate.
 eg.
-.IP
-.RS
 .ne 18
+.RS
 .nf
-.ta 4n 30n 33n
+.ft CW
 /var/log/corosync.log {
 	missingok
 	compress
@@ -506,12 +571,9 @@ eg.
 	rotate 7
 	copytruncate
 }
-.ta
+.ft
 .fi
 .RE
-.IP
-.PP
-
 
 .TP
 logfile
@@ -547,21 +609,10 @@ The default is: info.
 
 .TP
 debug
-This specifies whether debug output is logged for this particular logger.
+This specifies whether debug output is logged for this particular logger. Also can contain
+value trace, what is highest level of debug information.
 
 The default is off.
-
-.TP
-tags
-This specifies which tags should be traced for this particular logger.
-Set debug directive to
-.B on
-in order to enable tracing using tags.
-Values are specified using a vertical bar as a logical OR separator:
-
-enter|leave|trace1|trace2|trace3|...
-
-The default is none.
 
 .PP
 Within the
@@ -578,15 +629,64 @@ The subsys entry, described below, is mandatory to identify the subsystem.
 .TP
 subsys
 This specifies the subsystem identity (name) for which logging is specified. This is the
-name used by a service in the log_init () call. E.g. 'CKPT'. This directive is
+name used by a service in the log_init () call. E.g. 'CPG'. This directive is
 required.
+
+.PP
+Within the
+.B quorum
+directive it is possible to specify the quorum algorithm to use with the
+
+.TP
+provider
+directive. At the time of writing only corosync_votequorum is supported.
+See votequorum(5) for configuration options.
+
+.PP
+Within the
+.B nodelist
+directive it is possible to specify specific information about nodes in cluster. Directive
+can contain only
+.B node
+sub-directive, which specifies every node that should be a member of the membership, and where
+non-default options are needed. Every node must have at least ring0_addr field filled.
+
+For UDPU, every node that should be a member of the membership must be specified.
+
+Possible options are:
+.TP
+ringX_addr
+This specifies ip address of one of the nodes. X is ring number.
+
+.TP
+nodeid
+This configuration option is optional when using IPv4 and required when using
+IPv6.  This is a 32 bit value specifying the node identifier delivered to the
+cluster membership service.  If this is not specified with IPv4, the node id
+will be determined from the 32 bit IP address the system to which the system
+is bound with ring identifier of 0.  The node identifier value of zero is
+reserved and should not be used.
+
+.PP
+Within the
+.B qb
+directive it is possible to specify options for libqb.
+
+Possible option is:
+.TP
+ipc_type
+This specifies type of IPC to use. Can be one of native (default), shm and socket.
+Native means one of shm or socket, depending on what is supported by OS. On systems
+with support for both, SHM is selected. SHM is generally faster, but need to allocate
+ring buffer file in /dev/shm.
 
 .SH "FILES"
 .TP
-/etc/corosync.conf
+/etc/corosync/corosync.conf
 The corosync executive configuration file.
 
 .SH "SEE ALSO"
 .BR corosync_overview (8),
+.BR votequorum (5),
 .BR logrotate (8)
 .PP

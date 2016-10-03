@@ -37,11 +37,15 @@
 #include <errno.h>
 #include <string.h>
 
+/**
+ * @brief The sq struct
+ */
 struct sq {
 	unsigned int head;
 	unsigned int size;
 	void *items;
 	unsigned int *items_inuse;
+	unsigned int *items_miss_count;
 	unsigned int size_per_item;
 	unsigned int head_seqid;
 	unsigned int item_count;
@@ -52,17 +56,25 @@ struct sq {
  * Compare a unsigned rollover-safe value to an unsigned rollover-safe value
  */
 
-/*
+/**
  * ADJUST_ROLLOVER_POINT is the value used to determine when a window should be
  *	used to calculate a less-then or less-then-equal comparison.
- *
+ */
+#define ADJUST_ROLLOVER_POINT 0x80000000
+
+/**
  * ADJUST_ROLLOVER_VALUE is the value by which both values in a comparison are
  *	adjusted if either value in a comparison is greater then
  *	ADJUST_ROLLOVER_POINT.
  */
-#define ADJUST_ROLLOVER_POINT 0x80000000
 #define ADJUST_ROLLOVER_VALUE 0x10000
 
+/**
+ * @brief sq_lt_compare
+ * @param a
+ * @param b
+ * @return
+ */
 static inline int sq_lt_compare (unsigned int a, unsigned int b) {
 	if ((a > ADJUST_ROLLOVER_POINT) || (b > ADJUST_ROLLOVER_POINT)) {
 		if ((a - ADJUST_ROLLOVER_VALUE) < (b - ADJUST_ROLLOVER_VALUE)) {
@@ -76,6 +88,12 @@ static inline int sq_lt_compare (unsigned int a, unsigned int b) {
 	return (0);
 }
 
+/**
+ * @brief sq_lte_compare
+ * @param a
+ * @param b
+ * @return
+ */
 static inline int sq_lte_compare (unsigned int a, unsigned int b) {
 	if ((a > ADJUST_ROLLOVER_POINT) || (b > ADJUST_ROLLOVER_POINT)) {
 		if ((a - ADJUST_ROLLOVER_VALUE) <= (b - ADJUST_ROLLOVER_VALUE)) {
@@ -89,6 +107,14 @@ static inline int sq_lte_compare (unsigned int a, unsigned int b) {
 	return (0);
 }
 
+/**
+ * @brief sq_init
+ * @param sq
+ * @param item_count
+ * @param size_per_item
+ * @param head_seqid
+ * @return
+ */
 static inline int sq_init (
 	struct sq *sq,
 	int item_count,
@@ -112,10 +138,20 @@ static inline int sq_init (
 	    == NULL) {
 		return (-ENOMEM);
 	}
+	if ((sq->items_miss_count = malloc (item_count * sizeof (unsigned int)))
+	    == NULL) {
+		return (-ENOMEM);
+	}
 	memset (sq->items_inuse, 0, item_count * sizeof (unsigned int));
+	memset (sq->items_miss_count, 0, item_count * sizeof (unsigned int));
 	return (0);
 }
 
+/**
+ * @brief sq_reinit
+ * @param sq
+ * @param head_seqid
+ */
 static inline void sq_reinit (struct sq *sq, unsigned int head_seqid)
 {
 	sq->head = 0;
@@ -124,8 +160,14 @@ static inline void sq_reinit (struct sq *sq, unsigned int head_seqid)
 
 	memset (sq->items, 0, sq->item_count * sq->size_per_item);
 	memset (sq->items_inuse, 0, sq->item_count * sizeof (unsigned int));
+	memset (sq->items_miss_count, 0, sq->item_count * sizeof (unsigned int));
 }
 
+/**
+ * @brief sq_assert
+ * @param sq
+ * @param pos
+ */
 static inline void sq_assert (const struct sq *sq, unsigned int pos)
 {
 	unsigned int i;
@@ -136,6 +178,12 @@ static inline void sq_assert (const struct sq *sq, unsigned int pos)
 		assert (sq->items_inuse[i] == 0);
 	}
 }
+
+/**
+ * @brief sq_copy
+ * @param sq_dest
+ * @param sq_src
+ */
 static inline void sq_copy (struct sq *sq_dest, const struct sq *sq_src)
 {
 	sq_assert (sq_src, 20);
@@ -149,13 +197,27 @@ static inline void sq_copy (struct sq *sq_dest, const struct sq *sq_src)
 		sq_src->item_count * sq_src->size_per_item);
 	memcpy (sq_dest->items_inuse, sq_src->items_inuse,
 		sq_src->item_count * sizeof (unsigned int));
+	memcpy (sq_dest->items_miss_count, sq_src->items_miss_count,
+		sq_src->item_count * sizeof (unsigned int));
 }
 
+/**
+ * @brief sq_free
+ * @param sq
+ */
 static inline void sq_free (struct sq *sq) {
 	free (sq->items);
 	free (sq->items_inuse);
+	free (sq->items_miss_count);
 }
 
+/**
+ * @brief sq_item_add
+ * @param sq
+ * @param item
+ * @param seqid
+ * @return
+ */
 static inline void *sq_item_add (
 	struct sq *sq,
 	void *item,
@@ -178,10 +240,17 @@ static inline void *sq_item_add (
 	} else {
 		sq->items_inuse[sq_position] = seqid;
 	}
+	sq->items_miss_count[sq_position] = 0;
 
 	return (sq_item);
 }
 
+/**
+ * @brief sq_item_inuse
+ * @param sq
+ * @param seq_id
+ * @return
+ */
 static inline unsigned int sq_item_inuse (
 	const struct sq *sq,
 	unsigned int seq_id) {
@@ -204,12 +273,40 @@ static inline unsigned int sq_item_inuse (
 	return (sq->items_inuse[sq_position] != 0);
 }
 
+/**
+ * @brief sq_item_miss_count
+ * @param sq
+ * @param seq_id
+ * @return
+ */
+static inline unsigned int sq_item_miss_count (
+	const struct sq *sq,
+	unsigned int seq_id)
+{
+	unsigned int sq_position;
+
+	sq_position = (sq->head - sq->head_seqid + seq_id) % sq->size;
+	sq->items_miss_count[sq_position]++;
+	return (sq->items_miss_count[sq_position]);
+}
+
+/**
+ * @brief sq_size_get
+ * @param sq
+ * @return
+ */
 static inline unsigned int sq_size_get (
 	const struct sq *sq)
 {
 	return sq->size;
 }
 
+/**
+ * @brief sq_in_range
+ * @param sq
+ * @param seq_id
+ * @return
+ */
 static inline unsigned int sq_in_range (
 	const struct sq *sq,
 	unsigned int seq_id)
@@ -239,6 +336,13 @@ static inline unsigned int sq_in_range (
 
 }
 
+/**
+ * @brief sq_item_get
+ * @param sq
+ * @param seq_id
+ * @param sq_item_out
+ * @return
+ */
 static inline unsigned int sq_item_get (
 	const struct sq *sq,
 	unsigned int seq_id,
@@ -261,7 +365,6 @@ static inline unsigned int sq_item_get (
 //	sq_position = (sq->head - sq->head_seqid + seq_id) % sq->size;
 //printf ("sq_position = %x\n", sq_position);
 //printf ("ITEMGET %d %d %d %d\n", sq_position, sq->head, sq->head_seqid, seq_id);
-assert (sq_position >= 0);
 	if (sq->items_inuse[sq_position] == 0) {
 		return (ENOENT);
 	}
@@ -271,6 +374,11 @@ assert (sq_position >= 0);
 	return (0);
 }
 
+/**
+ * @brief sq_items_release
+ * @param sq
+ * @param seqid
+ */
 static inline void sq_items_release (struct sq *sq, unsigned int seqid)
 {
 	unsigned int oldhead;
@@ -286,6 +394,8 @@ static inline void sq_items_release (struct sq *sq, unsigned int seqid)
 	} else {
 //		printf ("releasing %d for %d\n", oldhead, seqid - sq->head_seqid + 1);
 		memset (&sq->items_inuse[oldhead], 0,
+			(seqid - sq->head_seqid + 1) * sizeof (unsigned int));
+		memset (&sq->items_miss_count[oldhead], 0,
 			(seqid - sq->head_seqid + 1) * sizeof (unsigned int));
 	}
 	sq->head_seqid = seqid + 1;

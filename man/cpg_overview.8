@@ -40,11 +40,18 @@ to create distributed applications that operate properly during cluster
 partitions, merges, and faults.
 .PP
 The library provides a mechanism to:
+.PP
 * handle abstraction for multiple instances of a CPG library in one application
+.PP
 * join one or more groups
+.PP
 * leave one or more groups
+.PP
 * Deliver messages to members of that group
+.PP
 * Deliver configuration changes
+.PP
+* Iterate members of groups
 .PP
 .SH SECURITY
 If encryption is enabled in corosync.conf, the CPG library will encrypt and
@@ -61,12 +68,15 @@ access the corosync services.
 .BR cpg_join (3),
 .BR cpg_leave (3),
 .BR cpg_mcast_joined (3),
-.BR cpg_membership_get (3)
-.BR cpg_zcb_alloc (3)
-.BR cpg_zcb_free (3)
-.BR cpg_zcb_mcast_joined (3)
-.BR cpg_context_get (3)
-.BR cpg_context_set (3)
-.BR cpg_local_get (3)
-
+.BR cpg_model_initialize (3),
+.BR cpg_membership_get (3),
+.BR cpg_zcb_alloc (3),
+.BR cpg_zcb_free (3),
+.BR cpg_zcb_mcast_joined (3),
+.BR cpg_context_get (3),
+.BR cpg_context_set (3),
+.BR cpg_local_get (3),
+.BR cpg_iteration_initialize (3),
+.BR cpg_iteration_next (3),
+.BR cpg_iteration_finalize (3)
 .PP

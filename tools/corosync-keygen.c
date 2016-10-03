@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004 MontaVista Software, Inc.
+ * Copyright (c) 2005-2011 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -34,43 +35,84 @@
 
 #include <config.h>
 
+#include <err.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
+#include <string.h>
+#include <getopt.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
 #include <netinet/in.h>
 
-#define KEYFILE COROSYSCONFDIR "/authkey"
+#define DEFAULT_KEYFILE COROSYSCONFDIR "/authkey"
 
-int main (void) {
+static const char usage[] =
+	"Usage: corosync-keygen [-k <keyfile>] [-l]\n"
+	"     -k / --key-file=<filename> -  Write to the specified keyfile\n"
+	"            instead of the default " DEFAULT_KEYFILE ".\n"
+	"     -l / --less-secure -  Use a less secure random number source\n"
+	"            (/dev/urandom) that is guaranteed not to require user\n"
+	"            input for entropy.  This can be used when this\n"
+	"            application is used from a script.\n";
+
+
+int main (int argc, char *argv[])
+{
 	int authkey_fd;
 	int random_fd;
+	char *keyfile = NULL;
 	unsigned char key[128];
 	ssize_t res;
 	ssize_t bytes_read;
+	int c;
+	int option_index;
+	int less_secure = 0;
+	static struct option long_options[] = {
+		{ "key-file",    required_argument, NULL, 'k' },
+		{ "less-secure", no_argument,       NULL, 'l' },
+		{ "help",        no_argument,       NULL, 'h' },
+		{ 0,             0,                 NULL, 0   },
+	};
 
-	printf ("Corosync Cluster Engine Authentication key generator.\n");
-	if (geteuid() != 0) {
-		printf ("Error: Authorization key must be generated as root user.\n");
-		exit (errno);
-	}
-	if (mkdir (COROSYSCONFDIR, 0700)) {
-		if (errno != EEXIST) {
-			perror ("Failed to create directory: " COROSYSCONFDIR);
-			exit (errno);
+	while ((c = getopt_long (argc, argv, "k:lh",
+			long_options, &option_index)) != -1) {
+		switch (c) {
+		case 'k':
+			keyfile = optarg;
+			break;
+		case 'l':
+			less_secure = 1;
+			break;
+		case 'h':
+			printf ("%s\n", usage);
+			exit(0);
+			break;
+		default:
+			printf ("Error parsing command line options.\n");
+			exit (1);
 		}
 	}
 
-	printf ("Gathering %lu bits for key from /dev/random.\n", (unsigned long)(sizeof (key) * 8));
-	printf ("Press keys on your keyboard to generate entropy.\n");
-	random_fd = open ("/dev/random", O_RDONLY);
+	printf ("Corosync Cluster Engine Authentication key generator.\n");
+
+	if (!keyfile) {
+		keyfile = (char *)DEFAULT_KEYFILE;
+	}
+
+	if (less_secure) {
+		printf ("Gathering %lu bits for key from /dev/urandom.\n", (unsigned long)(sizeof (key) * 8));
+		random_fd = open ("/dev/urandom", O_RDONLY);
+	} else {
+		printf ("Gathering %lu bits for key from /dev/random.\n", (unsigned long)(sizeof (key) * 8));
+		printf ("Press keys on your keyboard to generate entropy.\n");
+		random_fd = open ("/dev/random", O_RDONLY);
+	}
+
 	if (random_fd == -1) {
-		perror ("Is /dev/random present? Opening /dev/random");
-		exit (errno);
+		err (1, "Failed to open random source");
 	}
 
 	/*
@@ -81,8 +123,7 @@ int main (void) {
 retry_read:
 	res = read (random_fd, &key[bytes_read], sizeof (key) - bytes_read);
 	if (res == -1) {
-		perror ("Could not read /dev/random");
-		exit (errno);
+		err (1, "Could not read /dev/random");
 	}
 	bytes_read += res;
 	if (bytes_read != sizeof (key)) {
@@ -94,38 +135,26 @@ retry_read:
 	/*
 	 * Open key
 	 */
-	authkey_fd = open (KEYFILE, O_CREAT|O_WRONLY, 600);
+	authkey_fd = open (keyfile, O_CREAT|O_WRONLY, 0600);
 	if (authkey_fd == -1) {
-		perror ("Could not create " KEYFILE);
-		exit (errno);
-	}
-	/*
-	 * Set security of authorization key to uid = 0 gid = 0 mode = 0400
-	 */
-	res = fchown (authkey_fd, 0, 0);
-	if (res == -1) {
-		perror ("Could not fchown key to uid 0 and gid 0\n");
-		exit (errno);
+		err (2, "Could not create %s", keyfile);
 	}
 	if (fchmod (authkey_fd, 0400)) {
-		perror ("Failed to set key file permissions to 0400\n");
-		exit (errno);
+		err (3, "Failed to set key file permissions to 0400");
 	}
 
-	printf ("Writing corosync key to " KEYFILE ".\n");
+	printf ("Writing corosync key to %s.\n", keyfile);
 
 	/*
 	 * Write key
 	 */
 	res = write (authkey_fd, key, sizeof (key));
 	if (res != sizeof (key)) {
-		perror ("Could not write " KEYFILE);
-		exit (errno);
+		err (4, "Could not write %s", keyfile);
 	}
 
 	if (close (authkey_fd)) {
-		perror ("Could not write " KEYFILE);
-		exit (errno);
+		err (5, "Could not close %s", keyfile);
 	}
 
 	return (0);

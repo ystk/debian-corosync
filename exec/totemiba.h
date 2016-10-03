@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009 Red Hat, Inc.
+ * Copyright (c) 2009-2011 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -37,16 +37,18 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <corosync/hdb.h>
+#include <qb/qbloop.h>
 
 #include <corosync/totem/totem.h>
 
-/*
+/**
  * Create an instance
  */
 extern int totemiba_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t* qb_poll_handle,
 	void **iba_handle,
 	struct totem_config *totem_config,
+	totemsrp_stats_t *stats,
 	int interface_no,
 	void *context,
 
@@ -61,6 +63,10 @@ extern int totemiba_initialize (
 
 	void (*target_set_completed) (
 		void *context));
+
+extern void *totemiba_buffer_alloc (void);
+
+extern void totemiba_buffer_release (void *ptr);
 
 extern int totemiba_processor_count_set (
 	void *iba_context,
@@ -103,7 +109,8 @@ extern int totemiba_token_target_set (
 
 extern int totemiba_crypto_set (
 	void *iba_context,
-	unsigned int type);
+	const char *cipher_type,
+	const char *hash_type);
 
 extern int totemiba_recv_mcast_empty (
 	void *iba_context);

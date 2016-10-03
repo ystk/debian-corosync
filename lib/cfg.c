@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2002-2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2009 Red Hat, Inc.
+ * Copyright (c) 2006-2013 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -46,10 +46,11 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/un.h>
+#include <sys/uio.h>
+
+#include <qb/qbipcc.h>
 
 #include <corosync/corotypes.h>
-#include <corosync/coroipc_types.h>
-#include <corosync/coroipcc.h>
 #include <corosync/corodefs.h>
 #include <corosync/hdb.h>
 
@@ -61,8 +62,8 @@
 /*
  * Data structure for instance data
  */
-struct cfg_instance {
-	hdb_handle_t handle;
+struct cfg_inst {
+	qb_ipcc_connection_t *c;
 	corosync_cfg_callbacks_t callbacks;
 	cs_name_t comp_name;
 	int comp_registered;
@@ -72,7 +73,9 @@ struct cfg_instance {
 /*
  * All instances in one database
  */
-DECLARE_HDB_DATABASE (cfg_hdb,NULL);
+static void cfg_inst_free (void *inst);
+
+DECLARE_HDB_DATABASE (cfg_hdb, cfg_inst_free);
 
 /*
  * Implementation
@@ -83,32 +86,28 @@ corosync_cfg_initialize (
 	corosync_cfg_handle_t *cfg_handle,
 	const corosync_cfg_callbacks_t *cfg_callbacks)
 {
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	cs_error_t error = CS_OK;
 
-	error = hdb_error_to_cs (hdb_handle_create (&cfg_hdb, sizeof (struct cfg_instance), cfg_handle));
+	error = hdb_error_to_cs (hdb_handle_create (&cfg_hdb, sizeof (struct cfg_inst), cfg_handle));
 	if (error != CS_OK) {
 		goto error_no_destroy;
 	}
 
-	error = hdb_error_to_cs (hdb_handle_get (&cfg_hdb, *cfg_handle, (void *)&cfg_instance));
+	error = hdb_error_to_cs (hdb_handle_get (&cfg_hdb, *cfg_handle, (void *)&cfg_inst));
 	if (error != CS_OK) {
 		goto error_destroy;
 	}
 
-	error = coroipcc_service_connect (
-		COROSYNC_SOCKET_NAME,
-		CFG_SERVICE,
-		IPC_REQUEST_SIZE,
-		IPC_RESPONSE_SIZE,
-		IPC_DISPATCH_SIZE,
-		&cfg_instance->handle);
-	if (error != CS_OK) {
+	cfg_inst->finalize = 0;
+	cfg_inst->c = qb_ipcc_connect ("cfg", IPC_REQUEST_SIZE);
+	if (cfg_inst->c == NULL) {
+		error = qb_to_cs_error(-errno);
 		goto error_put_destroy;
 	}
 
 	if (cfg_callbacks) {
-	memcpy (&cfg_instance->callbacks, cfg_callbacks, sizeof (corosync_cfg_callbacks_t));
+	memcpy (&cfg_inst->callbacks, cfg_callbacks, sizeof (corosync_cfg_callbacks_t));
 	}
 
 	(void)hdb_handle_put (&cfg_hdb, *cfg_handle);
@@ -128,15 +127,15 @@ corosync_cfg_fd_get (
 	corosync_cfg_handle_t cfg_handle,
 	int32_t *selection_fd)
 {
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	cs_error_t error;
 
-	error = hdb_error_to_cs (hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_instance));
+	error = hdb_error_to_cs (hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
 
-	error = coroipcc_fd_get (cfg_instance->handle, selection_fd);
+	error = qb_to_cs_error (qb_ipcc_fd_get (cfg_inst->c, selection_fd));
 
 	(void)hdb_handle_put (&cfg_hdb, cfg_handle);
 	return (error);
@@ -150,37 +149,46 @@ corosync_cfg_dispatch (
 	int timeout = -1;
 	cs_error_t error;
 	int cont = 1; /* always continue do loop except when set to 0 */
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	struct res_lib_cfg_testshutdown *res_lib_cfg_testshutdown;
 	corosync_cfg_callbacks_t callbacks;
-	coroipc_response_header_t *dispatch_data;
+	struct qb_ipc_response_header *dispatch_data;
+	char dispatch_buf[IPC_DISPATCH_SIZE];
 
 	error = hdb_error_to_cs (hdb_handle_get (&cfg_hdb, cfg_handle,
-		(void *)&cfg_instance));
+		(void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
 
 	/*
-	 * Timeout instantly for CS_DISPATCH_ALL
+	 * Timeout instantly for CS_DISPATCH_ONE_NONBLOCKING or CS_DISPATCH_ALL and
+	 * wait indefinately for CS_DISPATCH_ONE or CS_DISPATCH_BLOCKING
 	 */
-	if (dispatch_flags == CS_DISPATCH_ALL) {
+	if (dispatch_flags == CS_DISPATCH_ALL || dispatch_flags == CS_DISPATCH_ONE_NONBLOCKING) {
 		timeout = 0;
 	}
 
+	dispatch_data = (struct qb_ipc_response_header *)dispatch_buf;
 	do {
-
-		error = coroipcc_dispatch_get (
-			cfg_instance->handle,
-			(void **)&dispatch_data,
-			timeout);
+		error = qb_to_cs_error (qb_ipcc_event_recv (
+			cfg_inst->c,
+			dispatch_buf,
+			IPC_DISPATCH_SIZE,
+			timeout));
 		if (error == CS_ERR_BAD_HANDLE) {
 			error = CS_OK;
 			goto error_put;
 		}
 		if (error == CS_ERR_TRY_AGAIN) {
+			if (dispatch_flags == CS_DISPATCH_ONE_NONBLOCKING) {
+				/*
+				 * Don't mask error
+				 */
+				goto error_put;
+			}
 			error = CS_OK;
-			if (dispatch_flags == CPG_DISPATCH_ALL) {
+			if (dispatch_flags == CS_DISPATCH_ALL) {
 				break; /* exit do while cont is 1 loop */
 			} else {
 				continue; /* next poll */
@@ -195,7 +203,7 @@ corosync_cfg_dispatch (
 		 * A risk of this dispatch method is that the callback routines may
 		 * operate at the same time that cfgFinalize has been called in another thread.
 		 */
-		memcpy (&callbacks, &cfg_instance->callbacks, sizeof (corosync_cfg_callbacks_t));
+		memcpy (&callbacks, &cfg_inst->callbacks, sizeof (corosync_cfg_callbacks_t));
 
 		/*
 		 * Dispatch incoming response
@@ -203,24 +211,29 @@ corosync_cfg_dispatch (
 		switch (dispatch_data->id) {
 		case MESSAGE_RES_CFG_TESTSHUTDOWN:
 			if (callbacks.corosync_cfg_shutdown_callback == NULL) {
-				continue;
+				break;
 			}
 
 			res_lib_cfg_testshutdown = (struct res_lib_cfg_testshutdown *)dispatch_data;
 			callbacks.corosync_cfg_shutdown_callback(cfg_handle, res_lib_cfg_testshutdown->flags);
 			break;
 		default:
-			coroipcc_dispatch_put (cfg_instance->handle);
 			error = CS_ERR_LIBRARY;
 			goto error_nounlock;
 			break;
 		}
-		coroipcc_dispatch_put (cfg_instance->handle);
+		if (cfg_inst->finalize) {
+			/*
+			 * If the finalize has been called then get out of the dispatch.
+			 */
+			error = CS_ERR_BAD_HANDLE;
+			goto error_put;
+		}
 
 		/*
 		 * Determine if more messages should be processed
 		 */
-		if (dispatch_flags == CS_DISPATCH_ONE) {
+		if (dispatch_flags == CS_DISPATCH_ONE || dispatch_flags == CS_DISPATCH_ONE_NONBLOCKING) {
 			cont = 0;
 		}
 	} while (cont);
@@ -231,14 +244,20 @@ error_nounlock:
 	return (error);
 }
 
+static void cfg_inst_free (void *inst)
+{
+	struct cfg_inst *cfg_inst = (struct cfg_inst *)inst;
+	qb_ipcc_disconnect(cfg_inst->c);
+}
+
 cs_error_t
 corosync_cfg_finalize (
 	corosync_cfg_handle_t cfg_handle)
 {
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	cs_error_t error;
 
-	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_instance));
+	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
@@ -246,14 +265,12 @@ corosync_cfg_finalize (
 	/*
 	 * Another thread has already started finalizing
 	 */
-	if (cfg_instance->finalize) {
+	if (cfg_inst->finalize) {
 		(void)hdb_handle_put (&cfg_hdb, cfg_handle);
 		return (CS_ERR_BAD_HANDLE);
 	}
 
-	cfg_instance->finalize = 1;
-
-	coroipcc_service_disconnect (cfg_instance->handle);
+	cfg_inst->finalize = 1;
 
 	(void)hdb_handle_destroy (&cfg_hdb, cfg_handle);
 
@@ -269,14 +286,14 @@ corosync_cfg_ring_status_get (
 	char ***status,
 	unsigned int *interface_count)
 {
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	struct req_lib_cfg_ringstatusget req_lib_cfg_ringstatusget;
 	struct res_lib_cfg_ringstatusget res_lib_cfg_ringstatusget;
-	unsigned int i;
+	unsigned int i, j;
 	cs_error_t error;
 	struct iovec iov;
 
-	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_instance));
+	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
@@ -287,11 +304,11 @@ corosync_cfg_ring_status_get (
 	iov.iov_base = (void *)&req_lib_cfg_ringstatusget,
 	iov.iov_len = sizeof (struct req_lib_cfg_ringstatusget),
 
-	error = coroipcc_msg_send_reply_receive(cfg_instance->handle,
+	error = qb_to_cs_error (qb_ipcc_sendv_recv(cfg_inst->c,
 		&iov,
 		1,
 		&res_lib_cfg_ringstatusget,
-		sizeof (struct res_lib_cfg_ringstatusget));
+		sizeof (struct res_lib_cfg_ringstatusget), CS_IPC_TIMEOUT_MS));
 
 	*interface_count = res_lib_cfg_ringstatusget.interface_count;
 	*interface_names = malloc (sizeof (char *) * *interface_count);
@@ -303,7 +320,7 @@ corosync_cfg_ring_status_get (
 	*status = malloc (sizeof (char *) * *interface_count);
 	if (*status == NULL) {
 		error = CS_ERR_NO_MEMORY;
-		goto error_free_interface_names;
+		goto error_free_interface_names_array;
 	}
 	memset (*status, 0, sizeof (char *) * *interface_count);
 
@@ -311,25 +328,33 @@ corosync_cfg_ring_status_get (
 		(*(interface_names))[i] = strdup (res_lib_cfg_ringstatusget.interface_name[i]);
 		if ((*(interface_names))[i] == NULL) {
 			error = CS_ERR_NO_MEMORY;
-			goto error_free_contents;
+			goto error_free_interface_names;
 		}
+	}
+
+	for (i = 0; i < res_lib_cfg_ringstatusget.interface_count; i++) {
 		(*(status))[i] = strdup (res_lib_cfg_ringstatusget.interface_status[i]);
 		if ((*(status))[i] == NULL) {
 			error = CS_ERR_NO_MEMORY;
-			goto error_free_contents;
+			goto error_free_status;
 		}
 	}
 	goto no_error;
 
-error_free_contents:
-	for (i = 0; i < res_lib_cfg_ringstatusget.interface_count; i++) {
-		free (*interface_names + i);
-		free (*status + i);
+error_free_status:
+	for (j = 0; j < i; j++) {
+		free ((*(status))[j]);
 	}
-
-	free (*status);
+	i = *interface_count;
 
 error_free_interface_names:
+	for (j = 0; j < i; j++) {
+		free ((*(interface_names))[j]);
+	}
+	
+	free (*status);
+
+error_free_interface_names_array:
 	free (*interface_names);
 
 no_error:
@@ -342,13 +367,13 @@ cs_error_t
 corosync_cfg_ring_reenable (
 	corosync_cfg_handle_t cfg_handle)
 {
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	struct req_lib_cfg_ringreenable req_lib_cfg_ringreenable;
 	struct res_lib_cfg_ringreenable res_lib_cfg_ringreenable;
 	cs_error_t error;
 	struct iovec iov;
 
-	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_instance));
+	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
@@ -359,162 +384,15 @@ corosync_cfg_ring_reenable (
 	iov.iov_base = (void *)&req_lib_cfg_ringreenable,
 	iov.iov_len = sizeof (struct req_lib_cfg_ringreenable);
 
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
+	error = qb_to_cs_error (qb_ipcc_sendv_recv (cfg_inst->c,
 		&iov,
 		1,
 		&res_lib_cfg_ringreenable,
-		sizeof (struct res_lib_cfg_ringreenable));
+		sizeof (struct res_lib_cfg_ringreenable), CS_IPC_TIMEOUT_MS));
 
 	(void)hdb_handle_put (&cfg_hdb, cfg_handle);
 
 	return (error);
-}
-
-cs_error_t
-corosync_cfg_service_load (
-	corosync_cfg_handle_t cfg_handle,
-	const char *service_name,
-	unsigned int service_ver)
-{
-	struct cfg_instance *cfg_instance;
-	struct req_lib_cfg_serviceload req_lib_cfg_serviceload;
-	struct res_lib_cfg_serviceload res_lib_cfg_serviceload;
-	cs_error_t error;
-	struct iovec iov;
-
-	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_instance));
-	if (error != CS_OK) {
-		return (error);
-	}
-
-	req_lib_cfg_serviceload.header.size = sizeof (struct req_lib_cfg_serviceload);
-	req_lib_cfg_serviceload.header.id = MESSAGE_REQ_CFG_SERVICELOAD;
-	memset (&req_lib_cfg_serviceload.service_name, 0,
-		sizeof (req_lib_cfg_serviceload.service_name));
-	strncpy (req_lib_cfg_serviceload.service_name, service_name,
-		sizeof (req_lib_cfg_serviceload.service_name) - 1);
-	req_lib_cfg_serviceload.service_ver = service_ver;
-
-	iov.iov_base = (void *)&req_lib_cfg_serviceload;
-	iov.iov_len = sizeof (req_lib_cfg_serviceload);
-
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
-		&iov,
-		1,
-		&res_lib_cfg_serviceload,
-		sizeof (struct res_lib_cfg_serviceload));
-
-	(void)hdb_handle_put (&cfg_hdb, cfg_handle);
-
-	return (error);
-}
-
-cs_error_t
-corosync_cfg_service_unload (
-	corosync_cfg_handle_t cfg_handle,
-	const char *service_name,
-	unsigned int service_ver)
-{
-	struct cfg_instance *cfg_instance;
-	struct req_lib_cfg_serviceunload req_lib_cfg_serviceunload;
-	struct res_lib_cfg_serviceunload res_lib_cfg_serviceunload;
-	cs_error_t error;
-	struct iovec iov;
-
-	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle, (void *)&cfg_instance));
-	if (error != CS_OK) {
-		return (error);
-	}
-
-	req_lib_cfg_serviceunload.header.size = sizeof (struct req_lib_cfg_serviceunload);
-	req_lib_cfg_serviceunload.header.id = MESSAGE_REQ_CFG_SERVICEUNLOAD;
-	memset (&req_lib_cfg_serviceunload.service_name, 0,
-		sizeof (req_lib_cfg_serviceunload.service_name));
-	strncpy (req_lib_cfg_serviceunload.service_name, service_name,
-		sizeof (req_lib_cfg_serviceunload.service_name) - 1);
-	req_lib_cfg_serviceunload.service_ver = service_ver;
-
-	iov.iov_base = (void *)&req_lib_cfg_serviceunload;
-	iov.iov_len = sizeof (req_lib_cfg_serviceunload);
-
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
-		&iov,
-		1,
-		&res_lib_cfg_serviceunload,
-		sizeof (struct res_lib_cfg_serviceunload));
-
-	(void)hdb_handle_put (&cfg_hdb, cfg_handle);
-
-	return (error);
-}
-cs_error_t
-corosync_cfg_state_track (
-	corosync_cfg_handle_t cfg_handle,
-	uint8_t track_flags,
-	const corosync_cfg_state_notification_t *notification_buffer)
-{
-	struct cfg_instance *cfg_instance;
-	struct req_lib_cfg_statetrack req_lib_cfg_statetrack;
-	struct res_lib_cfg_statetrack res_lib_cfg_statetrack;
-	cs_error_t error;
-	struct iovec iov;
-
-	req_lib_cfg_statetrack.header.size = sizeof (struct req_lib_cfg_statetrack);
-	req_lib_cfg_statetrack.header.id = MESSAGE_REQ_CFG_STATETRACKSTART;
-	req_lib_cfg_statetrack.track_flags = track_flags;
-	req_lib_cfg_statetrack.notification_buffer_address = (corosync_cfg_state_notification_t *)notification_buffer;
-
-	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle,
-		(void *)&cfg_instance));
-	if (error != CS_OK) {
-		return (error);
-	}
-
-	iov.iov_base = (void *)&req_lib_cfg_statetrack,
-	iov.iov_len = sizeof (struct req_lib_cfg_statetrack),
-
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
-		&iov,
-		1,
-		&res_lib_cfg_statetrack,
-		sizeof (struct res_lib_cfg_statetrack));
-
-	(void)hdb_handle_put (&cfg_hdb, cfg_handle);
-
-        return (error == CS_OK ? res_lib_cfg_statetrack.header.error : error);
-}
-
-cs_error_t
-corosync_cfg_state_track_stop (
-	corosync_cfg_handle_t cfg_handle)
-{
-	struct cfg_instance *cfg_instance;
-	struct req_lib_cfg_statetrackstop req_lib_cfg_statetrackstop;
-	struct res_lib_cfg_statetrackstop res_lib_cfg_statetrackstop;
-	cs_error_t error;
-	struct iovec iov;
-
-	error = hdb_error_to_cs (hdb_handle_get (&cfg_hdb, cfg_handle,
-		(void *)&cfg_instance));
-	if (error != CS_OK) {
-		return (error);
-	}
-
-	req_lib_cfg_statetrackstop.header.size = sizeof (struct req_lib_cfg_statetrackstop);
-	req_lib_cfg_statetrackstop.header.id = MESSAGE_REQ_CFG_STATETRACKSTOP;
-
-	iov.iov_base = (void *)&req_lib_cfg_statetrackstop,
-	iov.iov_len = sizeof (struct req_lib_cfg_statetrackstop),
-
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
-		&iov,
-		1,
-		&res_lib_cfg_statetrackstop,
-		sizeof (struct res_lib_cfg_statetrackstop));
-
-	(void)hdb_handle_put (&cfg_hdb, cfg_handle);
-
-        return (error == CS_OK ? res_lib_cfg_statetrackstop.header.error : error);
 }
 
 cs_error_t
@@ -523,7 +401,7 @@ corosync_cfg_kill_node (
 	unsigned int nodeid,
 	const char *reason)
 {
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	struct req_lib_cfg_killnode req_lib_cfg_killnode;
 	struct res_lib_cfg_killnode res_lib_cfg_killnode;
 	cs_error_t error;
@@ -533,7 +411,7 @@ corosync_cfg_kill_node (
 		return CS_ERR_NAME_TOO_LONG;
 
 	error = hdb_error_to_cs (hdb_handle_get (&cfg_hdb, cfg_handle,
-		(void *)&cfg_instance));
+		(void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
@@ -547,11 +425,11 @@ corosync_cfg_kill_node (
 	iov.iov_base = (void *)&req_lib_cfg_killnode;
 	iov.iov_len = sizeof (struct req_lib_cfg_killnode);
 
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
+	error = qb_to_cs_error (qb_ipcc_sendv_recv (cfg_inst->c,
 		&iov,
 		1,
 		&res_lib_cfg_killnode,
-		sizeof (struct res_lib_cfg_killnode));
+		sizeof (struct res_lib_cfg_killnode), CS_IPC_TIMEOUT_MS));
 
 	error = res_lib_cfg_killnode.header.error;
 
@@ -565,14 +443,14 @@ corosync_cfg_try_shutdown (
 	corosync_cfg_handle_t cfg_handle,
 	corosync_cfg_shutdown_flags_t flags)
 {
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	struct req_lib_cfg_tryshutdown req_lib_cfg_tryshutdown;
 	struct res_lib_cfg_tryshutdown res_lib_cfg_tryshutdown;
 	cs_error_t error;
 	struct iovec iov;
 
 	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle,
-		(void *)&cfg_instance));
+		(void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
@@ -584,11 +462,11 @@ corosync_cfg_try_shutdown (
 	iov.iov_base = (void *)&req_lib_cfg_tryshutdown;
 	iov.iov_len = sizeof (req_lib_cfg_tryshutdown);
 
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
+	error = qb_to_cs_error (qb_ipcc_sendv_recv (cfg_inst->c,
 		&iov,
 		1,
 		&res_lib_cfg_tryshutdown,
-		sizeof (struct res_lib_cfg_tryshutdown));
+		sizeof (struct res_lib_cfg_tryshutdown), CS_IPC_TIMEOUT_MS));
 
 	(void)hdb_handle_put (&cfg_hdb, cfg_handle);
 
@@ -600,14 +478,14 @@ corosync_cfg_replyto_shutdown (
 	corosync_cfg_handle_t cfg_handle,
 	corosync_cfg_shutdown_reply_flags_t response)
 {
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	struct req_lib_cfg_replytoshutdown req_lib_cfg_replytoshutdown;
 	struct res_lib_cfg_replytoshutdown res_lib_cfg_replytoshutdown;
 	struct iovec iov;
 	cs_error_t error;
 
 	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle,
-		(void *)&cfg_instance));
+		(void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
@@ -619,11 +497,11 @@ corosync_cfg_replyto_shutdown (
 	iov.iov_base = (void *)&req_lib_cfg_replytoshutdown;
 	iov.iov_len = sizeof (struct req_lib_cfg_replytoshutdown);
 
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
+	error = qb_to_cs_error (qb_ipcc_sendv_recv (cfg_inst->c,
 		&iov,
 		1,
 		&res_lib_cfg_replytoshutdown,
-		sizeof (struct res_lib_cfg_replytoshutdown));
+		sizeof (struct res_lib_cfg_replytoshutdown), CS_IPC_TIMEOUT_MS));
 
 	return (error);
 }
@@ -638,14 +516,15 @@ cs_error_t corosync_cfg_get_node_addrs (
 	cs_error_t error;
 	struct req_lib_cfg_get_node_addrs req_lib_cfg_get_node_addrs;
 	struct res_lib_cfg_get_node_addrs *res_lib_cfg_get_node_addrs;
-	struct cfg_instance *cfg_instance;
+	struct cfg_inst *cfg_inst;
 	int addrlen = 0;
 	int i;
 	struct iovec iov;
-	void *return_address;
+	const char *addr_buf;
+	char response_buf[IPC_RESPONSE_SIZE];
 
 	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, cfg_handle,
-		(void *)&cfg_instance));
+		(void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
@@ -657,12 +536,11 @@ cs_error_t corosync_cfg_get_node_addrs (
 	iov.iov_base = (char *)&req_lib_cfg_get_node_addrs;
 	iov.iov_len = sizeof (req_lib_cfg_get_node_addrs);
 
-	error = coroipcc_msg_send_reply_receive_in_buf_get (
-		cfg_instance->handle,
-		&iov,
-		1,
-		&return_address);
-	res_lib_cfg_get_node_addrs = return_address;
+	error = qb_to_cs_error (qb_ipcc_sendv_recv (
+		cfg_inst->c,
+		&iov, 1,
+		response_buf, IPC_RESPONSE_SIZE, CS_IPC_TIMEOUT_MS));
+	res_lib_cfg_get_node_addrs = (struct res_lib_cfg_get_node_addrs *)response_buf;
 
 	if (error != CS_OK) {
 		goto error_put;
@@ -673,7 +551,9 @@ cs_error_t corosync_cfg_get_node_addrs (
 	if (res_lib_cfg_get_node_addrs->family == AF_INET6)
 		addrlen = sizeof(struct sockaddr_in6);
 
-	for (i=0; i<max_addrs && i<res_lib_cfg_get_node_addrs->num_addrs; i++) {
+	for (i = 0, addr_buf = (char *)res_lib_cfg_get_node_addrs->addrs;
+	    i < max_addrs && i<res_lib_cfg_get_node_addrs->num_addrs;
+	    i++, addr_buf += TOTEMIP_ADDRLEN) {
 		struct sockaddr_in *in;
 		struct sockaddr_in6 *in6;
 
@@ -682,19 +562,18 @@ cs_error_t corosync_cfg_get_node_addrs (
 		if (res_lib_cfg_get_node_addrs->family == AF_INET) {
 			in = (struct sockaddr_in *)addrs[i].address;
 			in->sin_family = AF_INET;
-			memcpy(&in->sin_addr, &res_lib_cfg_get_node_addrs->addrs[i][0], sizeof(struct in_addr));
+			memcpy(&in->sin_addr, addr_buf, sizeof(struct in_addr));
 		}
 		if (res_lib_cfg_get_node_addrs->family == AF_INET6) {
 			in6 = (struct sockaddr_in6 *)addrs[i].address;
 			in6->sin6_family = AF_INET6;
-			memcpy(&in6->sin6_addr, &res_lib_cfg_get_node_addrs->addrs[i][0], sizeof(struct in6_addr));
+			memcpy(&in6->sin6_addr, addr_buf, sizeof(struct in6_addr));
 		}
 	}
 	*num_addrs = res_lib_cfg_get_node_addrs->num_addrs;
 	errno = error = res_lib_cfg_get_node_addrs->header.error;
 
 error_put:
-	error = coroipcc_msg_send_reply_receive_in_buf_put (cfg_instance->handle);
 	hdb_handle_put (&cfg_hdb, cfg_handle);
 
 	return (error);
@@ -705,7 +584,7 @@ cs_error_t corosync_cfg_local_get (
 	unsigned int *local_nodeid)
 {
 	cs_error_t error;
-	struct cfg_instance *cfg_inst;
+	struct cfg_inst *cfg_inst;
 	struct iovec iov;
 	struct req_lib_cfg_local_get req_lib_cfg_local_get;
 	struct res_lib_cfg_local_get res_lib_cfg_local_get;
@@ -715,18 +594,18 @@ cs_error_t corosync_cfg_local_get (
 		return (error);
 	}
 
-	req_lib_cfg_local_get.header.size = sizeof (coroipc_request_header_t);
+	req_lib_cfg_local_get.header.size = sizeof (struct qb_ipc_request_header);
 	req_lib_cfg_local_get.header.id = MESSAGE_REQ_CFG_LOCAL_GET;
 
 	iov.iov_base = (void *)&req_lib_cfg_local_get;
 	iov.iov_len = sizeof (struct req_lib_cfg_local_get);
 
-	error = coroipcc_msg_send_reply_receive (
-		cfg_inst->handle,
+	error = qb_to_cs_error (qb_ipcc_sendv_recv (
+		cfg_inst->c,
 		&iov,
 		1,
 		&res_lib_cfg_local_get,
-		sizeof (struct res_lib_cfg_local_get));
+		sizeof (struct res_lib_cfg_local_get), CS_IPC_TIMEOUT_MS));
 
 	if (error != CS_OK) {
 		goto error_exit;
@@ -742,39 +621,41 @@ error_exit:
 	return (error);
 }
 
-cs_error_t
-corosync_cfg_crypto_set (
-	corosync_cfg_handle_t handle,
-	unsigned int type)
+cs_error_t corosync_cfg_reload_config (
+	corosync_cfg_handle_t handle)
 {
-	struct cfg_instance *cfg_instance;
-	struct req_lib_cfg_crypto_set req_lib_cfg_crypto_set;
-	struct res_lib_cfg_crypto_set res_lib_cfg_crypto_set;
-	struct iovec iov;
 	cs_error_t error;
+	struct cfg_inst *cfg_inst;
+	struct iovec iov;
+	struct req_lib_cfg_reload_config req_lib_cfg_reload_config;
+	struct res_lib_cfg_reload_config res_lib_cfg_reload_config;
 
-
-	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, handle, (void *)&cfg_instance));
+	error = hdb_error_to_cs(hdb_handle_get (&cfg_hdb, handle, (void *)&cfg_inst));
 	if (error != CS_OK) {
 		return (error);
 	}
 
-	req_lib_cfg_crypto_set.header.id = MESSAGE_REQ_CFG_CRYPTO_SET;
-	req_lib_cfg_crypto_set.header.size = sizeof (struct req_lib_cfg_crypto_set);
-	req_lib_cfg_crypto_set.type = type;
+	req_lib_cfg_reload_config.header.size = sizeof (struct qb_ipc_request_header);
+	req_lib_cfg_reload_config.header.id = MESSAGE_REQ_CFG_RELOAD_CONFIG;
 
-	iov.iov_base = (void *)&req_lib_cfg_crypto_set;
-	iov.iov_len = sizeof (struct req_lib_cfg_crypto_set);
+	iov.iov_base = (void *)&req_lib_cfg_reload_config;
+	iov.iov_len = sizeof (struct req_lib_cfg_reload_config);
 
-	error = coroipcc_msg_send_reply_receive (cfg_instance->handle,
+	error = qb_to_cs_error (qb_ipcc_sendv_recv (
+		cfg_inst->c,
 		&iov,
 		1,
-		&res_lib_cfg_crypto_set,
-		sizeof (struct res_lib_cfg_crypto_set));
+		&res_lib_cfg_reload_config,
+		sizeof (struct res_lib_cfg_reload_config), CS_IPC_TIMEOUT_MS));
 
-	if (error == CS_OK)
-		error = res_lib_cfg_crypto_set.header.error;
+	if (error != CS_OK) {
+		goto error_exit;
+	}
 
+	error = res_lib_cfg_reload_config.header.error;
+
+error_exit:
 	(void)hdb_handle_put (&cfg_hdb, handle);
+
 	return (error);
 }

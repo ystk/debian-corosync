@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2008 Allied Telesis Labs.
+ * Copyright (c) 2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -35,40 +36,61 @@
 #ifndef COROTYPES_H_DEFINED
 #define COROTYPES_H_DEFINED
 
-#ifndef COROSYNC_SOLARIS
 #include <stdint.h>
-#else
-#include <sys/types.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/time.h>
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
+/**
+ * @brief cs_time_t
+ */
 typedef int64_t cs_time_t;
 
 #define CS_FALSE 0
 #define CS_TRUE !CS_FALSE
 #define CS_MAX_NAME_LENGTH 256
 #define CS_TIME_END    ((cs_time_t)0x7FFFFFFFFFFFFFFFULL)
+#define CS_MAX(x, y) (((x) > (y)) ? (x) : (y))
 
+/**
+ * @brief The cs_name_t struct
+ */
 typedef struct {
    uint16_t length;
    uint8_t value[CS_MAX_NAME_LENGTH];
 } cs_name_t;
 
+
+/**
+ * @brief The cs_version_t struct
+ */
 typedef struct {
    char releaseCode;
    unsigned char majorVersion;
    unsigned char minorVersion;
 } cs_version_t;
 
+/**
+ * @brief The cs_dispatch_flags_t enum
+ */
 typedef enum {
 	CS_DISPATCH_ONE = 1,
 	CS_DISPATCH_ALL = 2,
-	CS_DISPATCH_BLOCKING = 3
+	CS_DISPATCH_BLOCKING = 3,
+	CS_DISPATCH_ONE_NONBLOCKING = 4
 } cs_dispatch_flags_t;
 
 #define CS_TRACK_CURRENT 0x01
 #define CS_TRACK_CHANGES 0x02
 #define CS_TRACK_CHANGES_ONLY 0x04
 
+/**
+ * @brief The cs_error_t enum
+ */
 typedef enum {
    CS_OK = 1,
    CS_ERR_LIBRARY = 2,
@@ -102,79 +124,62 @@ typedef enum {
    CS_ERR_SECURITY = 100
 } cs_error_t;
 
+#define CS_IPC_TIMEOUT_MS -1
 
-/*
- * DEPRECATED
+#define CS_TIME_MS_IN_SEC   1000ULL
+#define CS_TIME_US_IN_SEC   1000000ULL
+#define CS_TIME_NS_IN_SEC   1000000000ULL
+#define CS_TIME_US_IN_MSEC  1000ULL
+#define CS_TIME_NS_IN_MSEC  1000000ULL
+#define CS_TIME_NS_IN_USEC  1000ULL
+
+/**
+ * @brief cs_timestamp_get
+ * @return
  */
-#define EVS_DISPATCH_ONE			CS_DISPATCH_ONE
-#define EVS_DISPATCH_ALL			CS_DISPATCH_ALL
-#define EVS_DISPATCH_BLOCKING		CS_DISPATCH_BLOCKING
-#define EVS_OK						CS_OK
-#define EVS_ERR_LIBRARY				CS_ERR_LIBRARY
-#define EVS_ERR_TIMEOUT				CS_ERR_TIMEOUT
-#define EVS_ERR_TRY_AGAIN			CS_ERR_TRY_AGAIN
-#define EVS_ERR_INVALID_PARAM		CS_ERR_INVALID_PARAM
-#define EVS_ERR_NO_MEMORY			CS_ERR_NO_MEMORY
-#define EVS_ERR_BAD_HANDLE			CS_ERR_BAD_HANDLE
-#define EVS_ERR_ACCESS				CS_ERR_ACCESS
-#define EVS_ERR_NOT_EXIST			CS_ERR_NOT_EXIST
-#define EVS_ERR_EXIST				CS_ERR_EXIST
-#define EVS_ERR_NOT_SUPPORTED		CS_ERR_NOT_SUPPORTED
-#define EVS_ERR_SECURITY			CS_ERR_SECURITY
-#define EVS_ERR_TOO_MANY_GROUPS		CS_ERR_TOO_MANY_GROUPS
-#define evs_error_t cs_error_t
+static inline uint64_t cs_timestamp_get(void)
+{
+	uint64_t result;
 
-#define CPG_DISPATCH_ONE			CS_DISPATCH_ONE
-#define CPG_DISPATCH_ALL			CS_DISPATCH_ALL
-#define CPG_DISPATCH_BLOCKING		CS_DISPATCH_BLOCKING
-#define CPG_OK						CS_OK
-#define CPG_ERR_LIBRARY				CS_ERR_LIBRARY
-#define CPG_ERR_TIMEOUT				CS_ERR_TIMEOUT
-#define CPG_ERR_TRY_AGAIN			CS_ERR_TRY_AGAIN
-#define CPG_ERR_INVALID_PARAM		CS_ERR_INVALID_PARAM
-#define CPG_ERR_NO_MEMORY			CS_ERR_NO_MEMORY
-#define CPG_ERR_BAD_HANDLE			CS_ERR_BAD_HANDLE
-#define CPG_ERR_ACCESS				CS_ERR_ACCESS
-#define CPG_ERR_BUSY				CS_ERR_BUSY
-#define CPG_ERR_NOT_EXIST			CS_ERR_NOT_EXIST
-#define CPG_ERR_EXIST				CS_ERR_EXIST
-#define CPG_ERR_NOT_SUPPORTED		CS_ERR_NOT_SUPPORTED
-#define CPG_ERR_SECURITY			CS_ERR_SECURITY
-#define CPG_ERR_TOO_MANY_GROUPS		CS_ERR_TOO_MANY_GROUPS
-#define cpg_error_t cs_error_t
+#if defined _POSIX_MONOTONIC_CLOCK && _POSIX_MONOTONIC_CLOCK >= 0
+	struct timespec ts;
 
-#define CONFDB_DISPATCH_ONE			CS_DISPATCH_ONE
-#define CONFDB_DISPATCH_ALL			CS_DISPATCH_ALL
-#define CONFDB_DISPATCH_BLOCKING	CS_DISPATCH_BLOCKING
-#define CONFDB_OK					CS_OK
-#define CONFDB_ERR_LIBRARY			CS_ERR_LIBRARY
-#define CONFDB_ERR_TIMEOUT			CS_ERR_TIMEOUT
-#define CONFDB_ERR_TRY_AGAIN		CS_ERR_TRY_AGAIN
-#define CONFDB_ERR_INVALID_PARAM	CS_ERR_INVALID_PARAM
-#define CONFDB_ERR_NO_MEMORY		CS_ERR_NO_MEMORY
-#define CONFDB_ERR_BAD_HANDLE		CS_ERR_BAD_HANDLE
-#define CONFDB_ERR_ACCESS			CS_ERR_ACCESS
-#define CONFDB_ERR_NOT_EXIST		CS_ERR_NOT_EXIST
-#define CONFDB_ERR_EXIST			CS_ERR_EXIST
-#define CONFDB_ERR_NOT_SUPPORTED	CS_ERR_NOT_SUPPORTED
-#define CONFDB_ERR_SECURITY			CS_ERR_SECURITY
-#define confdb_error_t cs_error_t
+	clock_gettime (CLOCK_MONOTONIC, &ts);
+	result = (ts.tv_sec * CS_TIME_NS_IN_SEC) + (uint64_t)ts.tv_nsec;
+#else
+	struct timeval time_from_epoch;
 
-#define QUORUM_DISPATCH_ONE			CS_DISPATCH_ONE
-#define QUORUM_DISPATCH_ALL			CS_DISPATCH_ALL
-#define QUORUM_DISPATCH_BLOCKING	CS_DISPATCH_BLOCKING
-#define QUORUM_OK					CS_OK
-#define QUORUM_ERR_LIBRARY			CS_ERR_LIBRARY
-#define QUORUM_ERR_TIMEOUT			CS_ERR_TIMEOUT
-#define QUORUM_ERR_TRY_AGAIN		CS_ERR_TRY_AGAIN
-#define QUORUM_ERR_INVALID_PARAM	CS_ERR_INVALID_PARAM
-#define QUORUM_ERR_NO_MEMORY		CS_ERR_NO_MEMORY
-#define QUORUM_ERR_BAD_HANDLE		CS_ERR_BAD_HANDLE
-#define QUORUM_ERR_ACCESS			CS_ERR_ACCESS
-#define QUORUM_ERR_NOT_EXIST		CS_ERR_NOT_EXIST
-#define QUORUM_ERR_EXIST			CS_ERR_EXIST
-#define QUORUM_ERR_NOT_SUPPORTED	CS_ERR_NOT_SUPPORTED
-#define QUORUM_ERR_SECURITY			CS_ERR_SECURITY
-#define quorum_error_t cs_error_t
-
+	gettimeofday (&time_from_epoch, 0);
+	result = ((time_from_epoch.tv_sec * CS_TIME_NS_IN_SEC) +
+		(time_from_epoch.tv_usec * CS_TIME_NS_IN_USEC));
 #endif
+
+	return result;
+}
+/**
+ * @brief qb_to_cs_error
+ * @param result
+ * @return
+ */
+cs_error_t qb_to_cs_error (int result);
+
+/**
+ * @brief cs_strerror
+ * @param err
+ * @return
+ */
+const char * cs_strerror(cs_error_t err);
+
+/**
+ * @brief hdb_error_to_cs
+ * @param res
+ * @return
+ */
+cs_error_t hdb_error_to_cs (int res);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* COROTYPES_H_DEFINED */
+

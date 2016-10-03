@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2009 Red Hat, Inc.
+ * Copyright (c) 2006-2012 Red Hat, Inc.
  *
  * Author: Steven Dake (sdake@redhat.com)
  *
@@ -44,7 +44,7 @@
 #else
 #define PROCESSOR_COUNT_MAX	384
 #define MESSAGE_SIZE_MAX	1024*1024 /* (1MB) */
-#define MESSAGE_QUEUE_MAX	MESSAGE_SIZE_MAX / totem_config->net_mtu
+#define MESSAGE_QUEUE_MAX	((4 * MESSAGE_SIZE_MAX) / totem_config->net_mtu)
 #endif /* HAVE_SMALL_MEMORY_FOOTPRINT */
 
 #define FRAME_SIZE_MAX		10000
@@ -52,32 +52,58 @@
 #define SEND_THREADS_MAX	16
 #define INTERFACE_MAX		2
 
+/**
+ * Maximum number of continuous gather states
+ */
+#define MAX_NO_CONT_GATHER	3
+/*
+ * Maximum number of continuous failures get from sendmsg call
+ */
+#define MAX_NO_CONT_SENDMSG_FAILURES	30
+
 struct totem_interface {
 	struct totem_ip_address bindnet;
 	struct totem_ip_address boundto;
 	struct totem_ip_address mcast_addr;
 	uint16_t ip_port;
+	uint16_t ttl;
+	int member_count;
+	struct totem_ip_address member_list[PROCESSOR_COUNT_MAX];
 };
 
 struct totem_logging_configuration {
 	void (*log_printf) (
-		unsigned int rec_ident,
+		int level,
+		int subsys,
 		const char *function_name,
 		const char *file_name,
 		int file_line,
 		const char *format,
-		...) __attribute__((format(printf, 5, 6)));
+		...) __attribute__((format(printf, 6, 7)));
 
 	int log_level_security;
 	int log_level_error;
 	int log_level_warning;
 	int log_level_notice;
 	int log_level_debug;
+	int log_level_trace;
 	int log_subsys_id;
 };
 
 enum { TOTEM_PRIVATE_KEY_LEN = 128 };
 enum { TOTEM_RRP_MODE_BYTES = 64 };
+
+typedef enum {
+	TOTEM_TRANSPORT_UDP = 0,
+	TOTEM_TRANSPORT_UDPU = 1,
+	TOTEM_TRANSPORT_RDMA = 2
+} totem_transport_t;
+
+#define MEMB_RING_ID
+struct memb_ring_id {
+	struct totem_ip_address rep;
+	unsigned long long seq;
+} __attribute__((packed));
 
 struct totem_config {
 	int version;
@@ -128,19 +154,13 @@ struct totem_config {
 
 	unsigned int rrp_problem_count_threshold;
 
+	unsigned int rrp_problem_count_mcast_threshold;
+
+	unsigned int rrp_autorecovery_check_timeout;
+
 	char rrp_mode[TOTEM_RRP_MODE_BYTES];
 
 	struct totem_logging_configuration totem_logging_configuration;
-
-	void (*log_rec) (
-		int subsysid,
-		const char *function_name,
-		const char *file_name,
-		int file_line,
-		unsigned int rec_ident,
-		...);
-
-	unsigned int secauth;
 
 	unsigned int net_mtu;
 
@@ -158,13 +178,23 @@ struct totem_config {
 
 	unsigned int broadcast_use;
 
-	enum { TOTEM_CRYPTO_SOBER=0, TOTEM_CRYPTO_NSS } crypto_type;
-	enum { TOTEM_CRYPTO_ACCEPT_OLD=0, TOTEM_CRYPTO_ACCEPT_NEW } crypto_accept;
+	char *crypto_cipher_type;
 
-	int crypto_crypt_type;
-	int crypto_sign_type;
+	char *crypto_hash_type;
 
-	int transport_number;
+	totem_transport_t transport_number;
+
+	unsigned int miss_count_const;
+
+	int ip_version;
+
+	void (*totem_memb_ring_id_create_or_load) (
+	    struct memb_ring_id *memb_ring_id,
+	    const struct totem_ip_address *addr);
+
+	void (*totem_memb_ring_id_store) (
+	    const struct memb_ring_id *memb_ring_id,
+	    const struct totem_ip_address *addr);
 };
 
 #define TOTEM_CONFIGURATION_TYPE
@@ -184,14 +214,7 @@ enum totem_event_type {
 	TOTEM_EVENT_NEW_MSG,
 };
 
-#define MEMB_RING_ID
-struct memb_ring_id {
-	struct totem_ip_address rep;
-	unsigned long long seq;
-} __attribute__((packed));
-
 typedef struct {
-	hdb_handle_t handle;
 	int is_dirty;
 	time_t last_updated;
 } totem_stats_header_t;
@@ -205,6 +228,8 @@ typedef struct {
 	totem_stats_header_t hdr;
 	totemnet_stats_t *net;
 	char *algo_name;
+	uint8_t *faulty;
+	uint32_t interface_count;
 } totemrrp_stats_t;
 
 
@@ -240,6 +265,8 @@ typedef struct {
 	uint64_t recovery_token_lost;
 	uint64_t consensus_timeouts;
 	uint64_t rx_msg_dropped;
+	uint32_t continuous_gather;
+	uint32_t continuous_sendmsg_failures;
 
 	int earliest_token;
 	int latest_token;
@@ -247,6 +274,9 @@ typedef struct {
 	totemsrp_token_stats_t token[TOTEM_TOKEN_STATS_MAX];
 
 } totemsrp_stats_t;
+
+ 
+ #define TOTEM_CONFIGURATION_TYPE
 
 typedef struct {
 	totem_stats_header_t hdr;
@@ -256,6 +286,8 @@ typedef struct {
 typedef struct {
 	totem_stats_header_t hdr;
 	totemmrp_stats_t *mrp;
+	uint32_t msg_reserved;
+	uint32_t msg_queue_avail;
 } totempg_stats_t;
 
 #endif /* TOTEM_H_DEFINED */

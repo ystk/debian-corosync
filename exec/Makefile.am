@@ -31,142 +31,52 @@
 
 MAINTAINERCLEANFILES	= Makefile.in
 
-AM_CFLAGS		= -fPIC
+noinst_HEADERS		= apidef.h cs_queue.h logconfig.h main.h \
+			  quorum.h service.h timer.h totemconfig.h \
+			  totemmrp.h totemnet.h totemudp.h totemiba.h \
+			  totemrrp.h totemudpu.h totemsrp.h util.h vsf.h \
+			  schedwrk.h sync.h fsm.h votequorum.h vsf_ykd.h \
+			  totemcrypto.h
 
-INCLUDES		= -I$(top_builddir)/include -I$(top_srcdir)/include $(nss_CFLAGS) $(rdmacm_CFLAGS) $(ibverbs_CFLAGS)
+TOTEM_SRC		= totemip.c totemnet.c totemudp.c \
+			  totemudpu.c totemrrp.c totemsrp.c totemmrp.c \
+			  totempg.c totemcrypto.c
 
-TOTEM_SRC		= coropoll.c totemip.c totemnet.c totemudp.c \
-			  totemrrp.c totemsrp.c totemmrp.c totempg.c \
-			  crypto.c wthread.c
 if BUILD_RDMA
 TOTEM_SRC		+= totemiba.c
 endif
 
-LOGSYS_SRC		= wthread.c logsys.c
-COROIPCS_SRC		= coroipcs.c
+lib_LTLIBRARIES		= libtotem_pg.la
+libtotem_pg_la_SOURCES	= $(TOTEM_SRC)
+libtotem_pg_la_CFLAGS	= $(nss_CFLAGS) $(rdmacm_CFLAGS) $(ibverbs_CFLAGS)
+libtotem_pg_la_LDFLAGS	= -version-number $(subst .,:,$(SONAME))
+libtotem_pg_la_LIBADD	= -lpthread $(LIBQB_LIBS) $(nss_LIBS) \
+			  $(rdmacm_LIBS) $(ibverbs_LIBS)
 
-LCRSO_SRC		= objdb.c vsf_ykd.c coroparse.c vsf_quorum.c
-LCRSO_OBJS		= $(LCRSO_SRC:%.c=%.o)
-LCRSO			= $(LCRSO_SRC:%.c=%.lcrso)
-
-lib_LIBRARIES		= libtotem_pg.a liblogsys.a libcoroipcs.a
 sbin_PROGRAMS		= corosync
 
-libtotem_pg_a_SOURCES	= $(TOTEM_SRC)
-liblogsys_a_SOURCES	= $(LOGSYS_SRC)
-libcoroipcs_a_SOURCES	= $(COROIPCS_SRC)
+corosync_SOURCES	= vsf_ykd.c coroparse.c vsf_quorum.c sync.c \
+			  logsys.c cfg.c cmap.c cpg.c pload.c \
+			  votequorum.c util.c schedwrk.c main.c \
+			  apidef.c quorum.c icmap.c timer.c \
+			  ipc_glue.c service.c logconfig.c totemconfig.c
 
-corosync_SOURCES 	= main.c util.c sync.c apidef.c service.c \
-			  timer.c totemconfig.c mainconfig.c quorum.c schedwrk.c \
-			  ../lcr/lcr_ifact.c evil.c syncv2.c
-corosync_LDADD	  	= -ltotem_pg -llogsys -lcoroipcs
-corosync_DEPENDENCIES	= libtotem_pg.so.$(SONAME) liblogsys.so.$(SONAME) libcoroipcs.so.$(SONAME)
-corosync_LDFLAGS	= $(OS_DYFLAGS) -L./
-
-TOTEM_OBJS		= $(TOTEM_SRC:%.c=%.o)
-LOGSYS_OBJS		= $(LOGSYS_SRC:%.c=%.o)
-COROIPCS_OBJS		= $(COROIPCS_SRC:%.c=%.o)
-
-SHARED_LIBS		= $(lib_LIBRARIES:%.a=%.so.$(SONAME))
-SHARED_LIBS_SO		= $(SHARED_LIBS:%.so.$(SONAME)=%.so)
-SHARED_LIBS_SO_TWO	= $(SHARED_LIBS:%.so.$(SONAME)=%.so.$(SOMAJOR))
-
-noinst_HEADERS		= apidef.h crypto.h mainconfig.h main.h \
-			  quorum.h service.h sync.h timer.h tlist.h totemconfig.h \
-			  totemmrp.h totemnet.h totemudp.h totemiba.h totemrrp.h \
-			  totemsrp.h util.h vsf.h wthread.h schedwrk.h \
-			  evil.h syncv2.h
-
-EXTRA_DIST		= $(LCRSO_SRC)
-
-if BUILD_DARWIN
-%.lcrso: %.o
-	$(CC) $(CFLAGS) -L$(top_builddir)/exec -llogsys -bundle -bind_at_load -bundle_loader ./corosync $^ -o $@
-
-libtotem_pg.so.$(SONAME): $(TOTEM_OBJS)
-	$(CC) $(LDFLAGS) $(DARWIN_OPTS) $(TOTEM_OBJS) -o $@ -lpthread
-	ln -sf libtotem_pg.so.$(SONAME) libtotem_pg.so
-	ln -sf libtotem_pg.so.$(SONAME) libtotem_pg.so.$(SOMAJOR)
-
-liblogsys.so.$(SONAME): $(LOGSYS_OBJS)
-	$(CC) $(LDFLAGS) $(DARWIN_OPTS) $(LOGSYS_OBJS) -o $@ -lpthread
-	ln -sf liblogsys.so.$(SONAME) liblogsys.so
-	ln -sf liblogsys.so.$(SONAME) liblogsys.so.$(SOMAJOR)
-
-libcoroipcs.so.$(SONAME): $(COROIPCS_OBJS)
-	$(CC) $(LDFLAGS) $(DARWIN_OPTS) $(COROIPCS_OBJS) -o $@ -lpthread
-	ln -sf libcoroipcs.so.$(SONAME) libcoroipcs.so
-	ln -sf libcoroipcs.so.$(SONAME) libcoroipcs.so.$(SOMAJOR)
-
-else
-
-if BUILD_SOLARIS
-%.lcrso: %.o
-	$(LD) -G $^ -o $@
-
-libtotem_pg.so.$(SONAME): $(TOTEM_OBJS)
-	$(LD) -G $(TOTEM_OBJS) -o $@ -lpthread
-	ln -sf libtotem_pg.so.$(SONAME) libtotem_pg.so
-	ln -sf libtotem_pg.so.$(SONAME) libtotem_pg.so.$(SOMAJOR)
-
-liblogsys.so.$(SONAME): $(LOGSYS_OBJS)
-	$(LD) -G $(LOGSYS_OBJS) -o $@ -lpthread
-	ln -sf liblogsys.so.$(SONAME) liblogsys.so
-	ln -sf liblogsys.so.$(SONAME) liblogsys.so.$(SOMAJOR)
-
-libcoroipcs.so.$(SONAME): $(COROIPCS_OBJS)
-	$(LD) -G $(COROIPCS_OBJS) -o $@ -lpthread
-	ln -sf libcoroipcs.so.$(SONAME) libcoroipcs.so
-	ln -sf libcoroipcs.so.$(SONAME) libcoroipcs.so.$(SOMAJOR)
-
-else
-
-%.lcrso: %.o
-	$(CC) $(CFLAGS) -shared -Wl,-soname=$@ $^ -o $@
-
-libtotem_pg.so.$(SONAME): $(TOTEM_OBJS)
-	$(CC) -shared -o $@ \
-		-Wl,-soname=libtotem_pg.so.$(SOMAJOR) \
-		$^ $(LDFLAGS) $(nss_LIBS) $(rdmacm_LIBS) $(ibverbs_LIBS) -lpthread
-	ln -sf libtotem_pg.so.$(SONAME) libtotem_pg.so
-	ln -sf libtotem_pg.so.$(SONAME) libtotem_pg.so.$(SOMAJOR)
-
-liblogsys.so.$(SONAME): $(LOGSYS_OBJS)
-	$(CC) -shared -o $@ \
-		-Wl,-soname=liblogsys.so.$(SOMAJOR) \
-		$^ $(LDFLAGS) -lpthread
-	ln -sf liblogsys.so.$(SONAME) liblogsys.so
-	ln -sf liblogsys.so.$(SONAME) liblogsys.so.$(SOMAJOR)
-
-libcoroipcs.so.$(SONAME): $(COROIPCS_OBJS)
-	$(CC) -shared -o $@ \
-		-Wl,-soname=libcoroipcs.so.$(SOMAJOR) \
-		$^ $(LDFLAGS) -lpthread
-	ln -sf libcoroipcs.so.$(SONAME) libcoroipcs.so
-	ln -sf libcoroipcs.so.$(SONAME) libcoroipcs.so.$(SOMAJOR)
-
+if BUILD_MONITORING
+corosync_SOURCES	+= mon.c
 endif
 
+if BUILD_WATCHDOG
+corosync_SOURCES	+= wd.c
 endif
+
+corosync_CPPFLAGS	= -DLOGCONFIG_USE_ICMAP=1
+
+corosync_CFLAGS         = $(statgrab_CFLAGS)
+
+corosync_LDADD		= libtotem_pg.la ../common_lib/libcorosync_common.la \
+			  $(LIBQB_LIBS) $(statgrab_LIBS)
+
+corosync_DEPENDENCIES	= libtotem_pg.la ../common_lib/libcorosync_common.la
 
 lint:
-	-splint $(INCLUDES) $(LINT_FLAGS) $(CFLAGS) *.c
-
-all-local: $(LCRSO_OBJS) $(LCRSO) $(SHARED_LIBS)
-	@echo Built corosync Executive
-
-install-exec-local:
-	$(INSTALL) -d $(DESTDIR)/$(libdir)
-	$(INSTALL) -m 755 $(SHARED_LIBS) $(DESTDIR)/$(libdir)
-	$(CP) -a $(SHARED_LIBS_SO) $(SHARED_LIBS_SO_TWO) $(DESTDIR)/$(libdir)
-	$(INSTALL) -d $(DESTDIR)/$(LCRSODIR)
-	$(INSTALL) -m 755 $(LCRSO) $(DESTDIR)/$(LCRSODIR)
-
-uninstall-local:
-	cd $(DESTDIR)/$(libdir) && \
-		rm -f $(SHARED_LIBS) $(SHARED_LIBS_SO) $(SHARED_LIBS_SO_TWO)
-	cd $(DESTDIR)/$(LCRSODIR) && \
-		rm -f $(LCRSO)
-
-clean-local:
-	rm -f corosync *.o *.lcrso gmon.out *.da *.bb *.bbg *.so*
+	-splint $(LINT_FLAGS) $(CPPFLAGS) $(CFLAGS) *.c

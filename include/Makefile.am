@@ -31,22 +31,17 @@
 
 MAINTAINERCLEANFILES    = Makefile.in corosync/config.h.in
 
-CS_H			= hdb.h cs_config.h cpg.h cfg.h evs.h mar_gen.h swab.h 	\
-			coroipcc.h coroipcs.h coroipc_types.h corodefs.h \
-			confdb.h list.h corotypes.h quorum.h votequorum.h sam.h
+CS_H			= hdb.h cpg.h cfg.h corodefs.h \
+			corotypes.h quorum.h votequorum.h sam.h cmap.h
 
-CS_INTERNAL_H		= ipc_cfg.h ipc_confdb.h ipc_cpg.h ipc_evs.h ipc_pload.h ipc_quorum.h 	\
-			jhash.h pload.h cs_queue.h quorum.h sq.h ipc_votequorum.h coroipc_ipc.h
+CS_INTERNAL_H		= ipc_cfg.h ipc_cpg.h ipc_quorum.h 	\
+			quorum.h sq.h ipc_votequorum.h ipc_cmap.h \
+			logsys.h coroapi.h icmap.h mar_gen.h list.h swab.h
 
-LCR_H			= lcr_ckpt.h lcr_comp.h	lcr_ifact.h
-
-ENGINE_H		= config.h coroapi.h logsys.h objdb.h quorum.h
-
-TOTEM_H			= coropoll.h totem.h totemip.h totempg.h
+TOTEM_H			= totem.h totemip.h totempg.h
 
 EXTRA_DIST 		= $(noinst_HEADERS)
 
 noinst_HEADERS          = $(CS_INTERNAL_H:%=corosync/%)
 
-nobase_include_HEADERS	= $(CS_H:%=corosync/%) $(LCR_H:%=corosync/lcr/%) 			\
-			$(ENGINE_H:%=corosync/engine/%) $(TOTEM_H:%=corosync/totem/%)
+nobase_include_HEADERS	= $(CS_H:%=corosync/%) $(TOTEM_H:%=corosync/totem/%)

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2005 MontaVista Software, Inc.
- * Copyright (c) 2009 Red Hat, Inc.
+ * Copyright (c) 2009-2013 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -39,23 +39,32 @@
 #include <corosync/corotypes.h>
 #include <corosync/mar_gen.h>
 
+#define CFG_INTERFACE_NAME_MAX_LEN		128
+#define CFG_INTERFACE_STATUS_MAX_LEN		512
+/*
+ * Too keep future ABI compatibility, this value
+ * is intentionaly bigger then INTERFACE_MAX
+ */
+#define CFG_MAX_INTERFACES			16
+
+/**
+ * @brief The req_lib_cfg_types enum
+ */
 enum req_lib_cfg_types {
 	MESSAGE_REQ_CFG_RINGSTATUSGET = 0,
 	MESSAGE_REQ_CFG_RINGREENABLE = 1,
-        MESSAGE_REQ_CFG_STATETRACKSTART = 2,
-        MESSAGE_REQ_CFG_STATETRACKSTOP = 3,
-        MESSAGE_REQ_CFG_ADMINISTRATIVESTATESET = 4,
-        MESSAGE_REQ_CFG_ADMINISTRATIVESTATEGET = 5,
-        MESSAGE_REQ_CFG_SERVICELOAD = 6,
-        MESSAGE_REQ_CFG_SERVICEUNLOAD = 7,
-	MESSAGE_REQ_CFG_KILLNODE = 8,
-	MESSAGE_REQ_CFG_TRYSHUTDOWN = 9,
-	MESSAGE_REQ_CFG_REPLYTOSHUTDOWN = 10,
-	MESSAGE_REQ_CFG_GET_NODE_ADDRS = 11,
-	MESSAGE_REQ_CFG_LOCAL_GET = 12,
-	MESSAGE_REQ_CFG_CRYPTO_SET = 13
+	MESSAGE_REQ_CFG_KILLNODE = 2,
+	MESSAGE_REQ_CFG_TRYSHUTDOWN = 3,
+	MESSAGE_REQ_CFG_REPLYTOSHUTDOWN = 4,
+	MESSAGE_REQ_CFG_GET_NODE_ADDRS = 5,
+	MESSAGE_REQ_CFG_LOCAL_GET = 6,
+	MESSAGE_REQ_CFG_RELOAD_CONFIG = 7,
+	MESSAGE_REQ_CFG_CRYPTO_SET = 8
 };
 
+/**
+ * @brief The res_lib_cfg_types enum
+ */
 enum res_lib_cfg_types {
         MESSAGE_RES_CFG_RINGSTATUSGET = 0,
         MESSAGE_RES_CFG_RINGREENABLE = 1,
@@ -72,150 +81,145 @@ enum res_lib_cfg_types {
 	MESSAGE_RES_CFG_LOCAL_GET = 12,
 	MESSAGE_RES_CFG_REPLYTOSHUTDOWN = 13,
 	MESSAGE_RES_CFG_CRYPTO_SET = 14,
+	MESSAGE_RES_CFG_RELOAD_CONFIG = 15
 };
 
-struct req_lib_cfg_statetrack {
-	coroipc_request_header_t header;
-	uint8_t track_flags;
-	corosync_cfg_state_notification_t *notification_buffer_address;
-};
-
-struct res_lib_cfg_statetrack {
-	coroipc_response_header_t header;
-};
-
-struct req_lib_cfg_statetrackstop {
-	coroipc_request_header_t header;
-};
-
-struct res_lib_cfg_statetrackstop {
-	coroipc_response_header_t header;
-};
-
-struct req_lib_cfg_administrativestateset {
-	coroipc_request_header_t header;
-	cs_name_t comp_name;
-	corosync_cfg_administrative_target_t administrative_target;
-	corosync_cfg_administrative_state_t administrative_state;
-};
-
-struct res_lib_cfg_administrativestateset {
-	coroipc_response_header_t header;
-};
-
-struct req_lib_cfg_administrativestateget {
-	coroipc_request_header_t header;
-	cs_name_t comp_name;
-	corosync_cfg_administrative_target_t administrative_target;
-	corosync_cfg_administrative_state_t administrative_state;
-};
-
-struct res_lib_cfg_administrativestateget {
-	coroipc_response_header_t header __attribute__((aligned(8)));
-};
-
+/**
+ * @brief The req_lib_cfg_ringstatusget struct
+ */
 struct req_lib_cfg_ringstatusget {
-	coroipc_request_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_request_header header __attribute__((aligned(8)));
 };
 
+/**
+ * @brief The res_lib_cfg_ringstatusget struct
+ */
 struct res_lib_cfg_ringstatusget {
-	coroipc_response_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
 	mar_uint32_t interface_count __attribute__((aligned(8)));
-	char interface_name[16][128] __attribute__((aligned(8)));
-	char interface_status[16][512] __attribute__((aligned(8)));
+	char interface_name[CFG_MAX_INTERFACES][CFG_INTERFACE_NAME_MAX_LEN] __attribute__((aligned(8)));
+	char interface_status[CFG_MAX_INTERFACES][CFG_INTERFACE_STATUS_MAX_LEN] __attribute__((aligned(8)));
 };
 
+/**
+ * @brief The req_lib_cfg_ringreenable struct
+ */
 struct req_lib_cfg_ringreenable {
-	coroipc_request_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_request_header header __attribute__((aligned(8)));
 };
 
+/**
+ * @brief The res_lib_cfg_ringreenable struct
+ */
 struct res_lib_cfg_ringreenable {
-	coroipc_response_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
 };
 
-struct req_lib_cfg_serviceload {
-	coroipc_response_header_t header __attribute__((aligned(8)));
-	char service_name[256] __attribute__((aligned(8)));
-	unsigned int service_ver;
-};
-
-struct res_lib_cfg_serviceload {
-	coroipc_response_header_t header __attribute__((aligned(8)));
-};
-
-struct req_lib_cfg_serviceunload {
-	coroipc_response_header_t header __attribute__((aligned(8)));
-	char service_name[256] __attribute__((aligned(8)));
-	unsigned int service_ver;
-};
-
-struct res_lib_cfg_serviceunload {
-	coroipc_response_header_t header __attribute__((aligned(8)));
-};
-
+/**
+ * @brief The req_lib_cfg_killnode struct
+ */
 struct req_lib_cfg_killnode {
-	coroipc_request_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_request_header header __attribute__((aligned(8)));
 	unsigned int nodeid __attribute__((aligned(8)));
 	cs_name_t reason __attribute__((aligned(8)));
 };
 
+/**
+ * @brief The res_lib_cfg_killnode struct
+ */
 struct res_lib_cfg_killnode {
-	coroipc_response_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
 };
 
+/**
+ * @brief The req_lib_cfg_tryshutdown struct
+ */
 struct req_lib_cfg_tryshutdown {
-	coroipc_request_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_request_header header __attribute__((aligned(8)));
 	unsigned int flags;
 };
 
+/**
+ * @brief The res_lib_cfg_tryshutdown struct
+ */
 struct res_lib_cfg_tryshutdown {
-	coroipc_response_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
 };
 
+/**
+ * @brief The req_lib_cfg_replytoshutdown struct
+ */
 struct req_lib_cfg_replytoshutdown {
-	coroipc_request_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_request_header header __attribute__((aligned(8)));
 	unsigned int response;
 };
 
+/**
+ * @brief The res_lib_cfg_replytoshutdown struct
+ */
 struct res_lib_cfg_replytoshutdown {
-	coroipc_response_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
 };
 
+/**
+ * @brief The res_lib_cfg_testshutdown struct
+ */
 struct res_lib_cfg_testshutdown {
-	coroipc_response_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
 	unsigned int flags;
 };
 
+/**
+ * @brief The req_lib_cfg_get_node_addrs struct
+ */
 struct req_lib_cfg_get_node_addrs {
-        coroipc_request_header_t header __attribute__((aligned(8)));
+        struct qb_ipc_request_header header __attribute__((aligned(8)));
 	unsigned int nodeid;
 };
 
+/**
+ * @brief The res_lib_cfg_get_node_addrs struct
+ */
 struct res_lib_cfg_get_node_addrs {
-        coroipc_response_header_t header __attribute__((aligned(8)));
+        struct qb_ipc_response_header header __attribute__((aligned(8)));
 	unsigned int family;
 	unsigned int num_addrs;
-	char addrs[TOTEMIP_ADDRLEN][0];
+	/* array of TOTEMIP_ADDRLEN items */
+	char addrs[];
 };
 
+/**
+ * @brief The req_lib_cfg_local_get struct
+ */
 struct req_lib_cfg_local_get {
-	coroipc_request_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_request_header header __attribute__((aligned(8)));
 };
 
+/**
+ * @brief The res_lib_cfg_local_get struct
+ */
 struct res_lib_cfg_local_get {
-	coroipc_response_header_t header __attribute__((aligned(8)));
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
 	mar_uint32_t local_nodeid __attribute__((aligned(8)));
 };
 
-struct req_lib_cfg_crypto_set {
-	coroipc_response_header_t header __attribute__((aligned(8)));
-	mar_uint32_t type __attribute__((aligned(8)));
+/**
+ * @brief The req_lib_cfg_reload_config struct
+ */
+struct req_lib_cfg_reload_config {
+	struct qb_ipc_request_header header __attribute__((aligned(8)));
 };
 
-struct res_lib_cfg_crypto_set {
-	coroipc_response_header_t header __attribute__((aligned(8)));
+/**
+ * @brief The res_lib_cfg_reload_config struct
+ */
+struct res_lib_cfg_reload_config {
+	struct qb_ipc_response_header header __attribute__((aligned(8)));
 };
 
+/**
+ * @brief corosync_administrative_target_t enum
+ */
 typedef enum {
 	AIS_AMF_ADMINISTRATIVETARGET_SERVICEUNIT = 0,
 	AIS_AMF_ADMINISTRATIVETARGET_SERVICEGROUP = 1,
@@ -223,12 +227,18 @@ typedef enum {
 	AIS_AMF_ADMINISTRATIVETARGET_NODE = 3
 } corosync_administrative_target_t;
 
+/**
+ * @brief corosync_administrative_state_t enum
+ */
 typedef enum {
 	AIS_AMF_ADMINISTRATIVESTATE_UNLOCKED = 0,
 	AIS_AMF_ADMINISTRATIVESTATE_LOCKED = 1,
 	AIS_AMF_ADMINISTRATIVESTATE_STOPPING = 2
 } corosync_administrative_state_t;
 
+/**
+ * @brief corosync_shutdown_flags_t enum
+ */
 typedef enum {
 	CFG_SHUTDOWN_FLAG_REQUEST = 0,
 	CFG_SHUTDOWN_FLAG_REGARDLESS = 1,

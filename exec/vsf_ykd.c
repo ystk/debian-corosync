@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2009 Red Hat, Inc.
+ * Copyright (c) 2006-2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -56,14 +56,15 @@
 #include <sched.h>
 #include <time.h>
 
-#include <corosync/engine/logsys.h>
+#include "quorum.h"
+#include <corosync/logsys.h>
 #include <corosync/corotypes.h>
-#include <corosync/coroipc_types.h>
+#include <qb/qbipc_common.h>
 #include <corosync/mar_gen.h>
-#include <corosync/engine/coroapi.h>
-#include <corosync/engine/quorum.h>
+#include <corosync/coroapi.h>
 #include <corosync/swab.h>
-#include <corosync/lcr/lcr_comp.h>
+
+#include "vsf_ykd.h"
 
 LOGSYS_DECLARE_SUBSYS ("YKD");
 
@@ -111,7 +112,7 @@ struct state_received {
 
 struct ykd_state ykd_state;
 
-static hdb_handle_t ykd_group_handle;
+static void *ykd_group_handle;
 
 static struct state_received state_received_confchg[YKD_PROCESSOR_COUNT_MAX];
 
@@ -193,7 +194,7 @@ static int ykd_attempt_send_msg (const void *context)
 	struct ykd_header header;
 	int res;
 
-	header.id = YKD_HEADER_SENDSTATE;
+	header.id = YKD_HEADER_ATTEMPT;
 
 	iovec.iov_base = (char *)&header;
 	iovec.iov_len = sizeof (struct ykd_header);
@@ -343,6 +344,7 @@ static void ykd_deliver_fn (
 	int all_received = 1;
 	int state_position = 0;
 	int i;
+	struct ykd_header *header = (struct ykd_header *)msg;
 	char *msg_state = (char *)msg + sizeof (struct ykd_header);
 
 	/*
@@ -351,7 +353,7 @@ static void ykd_deliver_fn (
 #ifdef TODO
 	if (totemip_localhost_check (source_addr)) {
 		log_printf (LOGSYS_LEVEL_NOTICE,
-			"This processor is within the primary component.\n");
+			"This processor is within the primary component.");
 			primary_designated = 1;
 
 			ykd_primary_callback_fn (
@@ -390,6 +392,13 @@ static void ykd_deliver_fn (
 		}
 	}
 
+	/*
+	 * Ignore messages from a different state
+	 */
+	if ((ykd_mode == YKD_MODE_SENDSTATE && header->id == YKD_HEADER_ATTEMPT) ||
+	    (ykd_mode == YKD_MODE_ATTEMPT && header->id == YKD_HEADER_SENDSTATE))
+	  	return;
+
 	switch (ykd_mode) {
 		case YKD_MODE_SENDSTATE:
 			assert (msg_len > sizeof (struct ykd_header));
@@ -426,7 +435,7 @@ static void ykd_deliver_fn (
 		case YKD_MODE_ATTEMPT:
 			if (all_received) {
 				log_printf (LOGSYS_LEVEL_NOTICE,
-					"This processor is within the primary component.\n");
+					"This processor is within the primary component.");
 				ykd_primary_designated = 1;
 
 				ykd_primary_callback_fn (
@@ -499,12 +508,18 @@ struct corosync_tpg_group ykd_group = {
 	.group_len	= 3
 };
 
-static void ykd_init (
+char *ykd_init (
 	struct corosync_api_v1 *corosync_api,
 	quorum_set_quorate_fn_t set_primary)
 {
+	const char *error = NULL;
+
 	ykd_primary_callback_fn = set_primary;
 	api = corosync_api;
+
+	if (set_primary == 0) {
+		error = (char *)"set primary not set";
+	}
 
 	api->tpg_init (
 		&ykd_group_handle,
@@ -517,40 +532,6 @@ static void ykd_init (
 		1);
 
 	ykd_state_init ();
-}
 
-/*
- * lcrso object definition
- */
-static struct quorum_services_api_ver1 vsf_ykd_iface_ver0 = {
-	.init				= ykd_init,
-};
-
-static struct lcr_iface corosync_vsf_ykd_ver0[1] = {
-	{
-		.name			= "corosync_quorum_ykd",
-		.version		= 0,
-		.versions_replace	= 0,
-		.versions_replace_count	= 0,
-		.dependencies		= 0,
-		.dependency_count	= 0,
-		.constructor		= NULL,
-		.destructor		= NULL,
-		.interfaces		= (void **)(void *)&vsf_ykd_iface_ver0,
-	}
-};
-
-static struct lcr_comp vsf_ykd_comp_ver0 = {
-	.iface_count			= 1,
-	.ifaces				= corosync_vsf_ykd_ver0
-};
-
-#ifdef COROSYNC_SOLARIS
-void corosync_lcr_component_register (void);
-
-void corosync_lcr_component_register (void) {
-#else
-__attribute__ ((constructor)) static void corosync_lcr_component_register (void) {
-#endif
-	lcr_component_register (&vsf_ykd_comp_ver0);
+	return ((char *)error);
 }

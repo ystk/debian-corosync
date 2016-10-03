@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2005 MontaVista Software, Inc.
- * Copyright (c) 2006-2007 Red Hat, Inc.
+ * Copyright (c) 2006-2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -38,24 +38,30 @@
 #include <netinet/in.h>
 #include <corosync/corotypes.h>
 #include <corosync/list.h>
-#include <corosync/totem/coropoll.h>
+#include <qb/qbloop.h>
 #include <corosync/totem/totempg.h>
-#include <corosync/engine/objdb.h>
 
 #include "totemsrp.h"
 
+#define TOTEM_CONFIG_WARNING_MEMBERS_IGNORED		(1<<1)
+#define TOTEM_CONFIG_WARNING_MEMBERS_DEPRECATED		(1<<2)
+#define TOTEM_CONFIG_WARNING_TOTEM_NODEID_IGNORED	(1<<3)
+
 extern int totem_config_read (
-	struct objdb_iface_ver0 *objdb,
 	struct totem_config *totem_config,
-	const char **error_string);
+	const char **error_string,
+	uint64_t *warnings);
 
 extern int totem_config_validate (
 	struct totem_config *totem_config,
 	const char **error_string);
 
-int totem_config_keyread (
-	struct objdb_iface_ver0 *objdb,
+extern int totem_config_keyread (
 	struct totem_config *totem_config,
 	const char **error_string);
+
+extern int totem_config_find_local_addr_in_nodelist(
+	const char *ipaddr_key_prefix,
+	unsigned int *node_pos);
 
 #endif /* TOTEMCONFIG_H_DEFINED */

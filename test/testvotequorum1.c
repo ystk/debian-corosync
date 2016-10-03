@@ -35,6 +35,7 @@
 #include <config.h>
 
 #include <sys/types.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -48,20 +49,14 @@ static votequorum_handle_t g_handle;
 static const char *node_state(int state)
 {
 	switch (state) {
-	case NODESTATE_JOINING:
-		return "Joining";
-		break;
-	case NODESTATE_MEMBER:
+	case VOTEQUORUM_NODESTATE_MEMBER:
 		return "Member";
 		break;
-	case NODESTATE_DEAD:
+	case VOTEQUORUM_NODESTATE_DEAD:
 		return "Dead";
 		break;
-	case NODESTATE_LEAVING:
+	case VOTEQUORUM_NODESTATE_LEAVING:
 		return "Leaving";
-		break;
-	case NODESTATE_DISALLOWED:
-		return "Disallowed";
 		break;
 	default:
 		return "UNKNOWN";
@@ -85,6 +80,7 @@ static void votequorum_notification_fn(
 	votequorum_handle_t handle,
 	uint64_t context,
 	uint32_t quorate,
+	votequorum_ring_id_t ring_id,
 	uint32_t node_list_entries,
 	votequorum_node_t node_list[]
 	)
@@ -94,6 +90,7 @@ static void votequorum_notification_fn(
 	printf("votequorum notification called \n");
 	printf("  quorate         = %d\n", quorate);
 	printf("  number of nodes = %d\n", node_list_entries);
+	printf("  current ringid  = (%u.%"PRIu64")\n", ring_id.nodeid, ring_id.seq);
 
 	for (i = 0; i< node_list_entries; i++) {
 		printf("      %d: %s\n", node_list[i].nodeid, node_state(node_list[i].state));
@@ -131,10 +128,13 @@ int main(int argc, char *argv[])
 		printf("total votes      %d\n", info.total_votes);
 		printf("quorum           %d\n", info.quorum);
 		printf("flags            ");
-		if (info.flags & VOTEQUORUM_INFO_FLAG_HASSTATE) printf("HasState ");
-		if (info.flags & VOTEQUORUM_INFO_FLAG_DISALLOWED) printf("Disallowed ");
-		if (info.flags & VOTEQUORUM_INFO_FLAG_TWONODE) printf("2Node ");
-		if (info.flags & VOTEQUORUM_INFO_FLAG_QUORATE) printf("Quorate ");
+		if (info.flags & VOTEQUORUM_INFO_TWONODE) printf("2Node ");
+		if (info.flags & VOTEQUORUM_INFO_QUORATE) printf("Quorate ");
+		if (info.flags & VOTEQUORUM_INFO_WAIT_FOR_ALL) printf("WaitForAll ");
+		if (info.flags & VOTEQUORUM_INFO_LAST_MAN_STANDING) printf("LastManStanding ");
+		if (info.flags & VOTEQUORUM_INFO_AUTO_TIE_BREAKER) printf("AutoTieBreaker ");
+		if (info.flags & VOTEQUORUM_INFO_ALLOW_DOWNSCALE) printf("AllowDownscale ");
+
 		printf("\n");
 	}
 
@@ -158,10 +158,12 @@ int main(int argc, char *argv[])
 			printf("total votes      %d\n", info.total_votes);
 			printf("votequorum           %d\n", info.quorum);
 			printf("flags            ");
-			if (info.flags & VOTEQUORUM_INFO_FLAG_HASSTATE) printf("HasState ");
-			if (info.flags & VOTEQUORUM_INFO_FLAG_DISALLOWED) printf("Disallowed ");
-			if (info.flags & VOTEQUORUM_INFO_FLAG_TWONODE) printf("2Node ");
-			if (info.flags & VOTEQUORUM_INFO_FLAG_QUORATE) printf("Quorate ");
+			if (info.flags & VOTEQUORUM_INFO_TWONODE) printf("2Node ");
+			if (info.flags & VOTEQUORUM_INFO_QUORATE) printf("Quorate ");
+			if (info.flags & VOTEQUORUM_INFO_WAIT_FOR_ALL) printf("WaitForAll ");
+			if (info.flags & VOTEQUORUM_INFO_LAST_MAN_STANDING) printf("LastManStanding ");
+			if (info.flags & VOTEQUORUM_INFO_AUTO_TIE_BREAKER) printf("AutoTieBreaker ");
+			if (info.flags & VOTEQUORUM_INFO_ALLOW_DOWNSCALE) printf("AllowDownscale ");
 			printf("\n");
 		}
 	}
@@ -169,8 +171,12 @@ int main(int argc, char *argv[])
 	printf("Waiting for votequorum events, press ^C to finish\n");
 	printf("-------------------\n");
 
-	while (1)
-		votequorum_dispatch(g_handle, CS_DISPATCH_ALL);
+	while (1) {
+		if (votequorum_dispatch(g_handle, CS_DISPATCH_ALL) != CS_OK) {
+			fprintf(stderr, "votequorum_dispatch error\n");
+			return -1;
+		}
+	}
 
 	return 0;
 }

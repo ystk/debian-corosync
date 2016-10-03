@@ -1,6 +1,7 @@
 
 /*
  * Copyright (c) 2002-2003 MontaVista Software, Inc.
+ * Copyright (c) 2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -33,25 +34,12 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AIS_UTIL_H_DEFINED
-#define AIS_UTIL_H_DEFINED
+#ifndef COROSYNC_UTIL_H_DEFINED
+#define COROSYNC_UTIL_H_DEFINED
 
-#include <errno.h>
+#include <corosync/corotypes.h>
 
-static inline cs_error_t hdb_error_to_cs (int res)		\
-{								\
-	if (res == 0) {						\
-		return (CS_OK);					\
-	} else {						\
-		if (errno == EBADF) {				\
-			return (CS_ERR_BAD_HANDLE);		\
-		} else						\
-		if (errno == ENOMEM) {				\
-			return (CS_ERR_NO_MEMORY);		\
-		}						\
-		return (CS_ERR_LIBRARY);			\
-	}							\
-}
+cs_error_t hdb_error_to_cs (int res);
 
 #ifdef HAVE_SMALL_MEMORY_FOOTPRINT
 #define IPC_REQUEST_SIZE        1024*64
@@ -63,4 +51,4 @@ static inline cs_error_t hdb_error_to_cs (int res)		\
 #define IPC_DISPATCH_SIZE       8192*128
 #endif /* HAVE_SMALL_MEMORY_FOOTPRINT */
 
-#endif /* AIS_UTIL_H_DEFINED */
+#endif /* COROSYNC_UTIL_H_DEFINED */

@@ -56,7 +56,7 @@
 #include <sys/poll.h>
 
 #include <corosync/totem/totem.h>
-#include <corosync/totem/coropoll.h>
+#include <qb/qbloop.h>
 
 #include "totemmrp.h"
 #include "totemsrp.h"
@@ -116,7 +116,7 @@ void totemmrp_confchg_fn (
  * Initialize the totem multiple ring protocol
  */
 int totemmrp_initialize (
-	hdb_handle_t poll_handle,
+	qb_loop_t *poll_handle,
 	struct totem_config *totem_config,
 	totempg_stats_t *stats,
 
@@ -130,7 +130,9 @@ int totemmrp_initialize (
 		const unsigned int *member_list, size_t member_list_entries,
 		const unsigned int *left_list, size_t left_list_entries,
 		const unsigned int *joined_list, size_t joined_list_entries,
-		const struct memb_ring_id *ring_id))
+		const struct memb_ring_id *ring_id),
+	void (*waiting_trans_ack_cb_fn) (
+		int waiting_trans_ack))
 {
 	int result;
 	pg_deliver_fn = deliver_fn;
@@ -143,7 +145,8 @@ int totemmrp_initialize (
 		totem_config,
 		stats->mrp,
 		totemmrp_deliver_fn,
-		totemmrp_confchg_fn);
+		totemmrp_confchg_fn,
+		waiting_trans_ack_cb_fn);
 
 	return (result);
 }
@@ -196,6 +199,7 @@ void totemmrp_event_signal (enum totem_event_type type, int value)
 int totemmrp_ifaces_get (
 	unsigned int nodeid,
 	struct totem_ip_address *interfaces,
+	unsigned int interfaces_size,
 	char ***status,
 	unsigned int *iface_count)
 {
@@ -205,6 +209,7 @@ int totemmrp_ifaces_get (
 		totemsrp_context,
 		nodeid,
 		interfaces,
+		interfaces_size,
 		status,
 		iface_count);
 
@@ -212,10 +217,12 @@ int totemmrp_ifaces_get (
 }
 
 int totemmrp_crypto_set (
-	unsigned int type)
+	const char *cipher_type,
+	const char *hash_type)
 {
 	return totemsrp_crypto_set (totemsrp_context,
-				    type);
+				    cipher_type,
+				    hash_type);
 }
 
 unsigned int totemmrp_my_nodeid_get (void)
@@ -244,4 +251,36 @@ extern void totemmrp_service_ready_register (
 	totemsrp_service_ready_register (
 		totemsrp_context,
 		totem_service_ready);
+}
+
+int totemmrp_member_add (
+        const struct totem_ip_address *member,
+        int ring_no)
+{
+	int res;
+
+	res = totemsrp_member_add (totemsrp_context, member, ring_no);
+
+	return (res);
+}
+
+int totemmrp_member_remove (
+       const struct totem_ip_address *member,
+        int ring_no)
+{
+	int res;
+
+	res = totemsrp_member_remove (totemsrp_context, member, ring_no);
+
+	return (res);
+}
+
+void totemmrp_threaded_mode_enable (void)
+{
+	totemsrp_threaded_mode_enable (totemsrp_context);
+}
+
+void totemmrp_trans_ack (void)
+{
+	totemsrp_trans_ack (totemsrp_context);
 }

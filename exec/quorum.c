@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008 Red Hat, Inc.
+ * Copyright (c) 2008-2012 Red Hat, Inc.
  *
  * All rights reserved.
  *
@@ -51,16 +51,13 @@
 #include <arpa/inet.h>
 
 #include <corosync/corotypes.h>
-#include <corosync/coroipc_types.h>
 #include <corosync/swab.h>
 #include <corosync/totem/totempg.h>
 #include <corosync/totem/totem.h>
-#include <corosync/lcr/lcr_ifact.h>
-#include <corosync/engine/logsys.h>
+#include <corosync/logsys.h>
 
 #include "quorum.h"
 #include "main.h"
-#include "sync.h"
 #include "vsf.h"
 
 LOGSYS_DECLARE_SUBSYS ("QUORUM");
