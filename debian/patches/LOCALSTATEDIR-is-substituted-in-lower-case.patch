@@ -1,0 +1,210 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Mon, 28 Nov 2016 11:50:19 +0100
+Subject: LOCALSTATEDIR is substituted in lower case
+
+---
+ init/corosync-notifyd.conf.in |  6 +++---
+ init/corosync-notifyd.in      |  8 ++++----
+ init/corosync-qdevice.in      | 12 ++++++------
+ init/corosync-qnetd.in        | 14 +++++++-------
+ init/corosync.conf.in         |  6 +++---
+ init/corosync.in              |  8 ++++----
+ 6 files changed, 27 insertions(+), 27 deletions(-)
+
+diff --git a/init/corosync-notifyd.conf.in b/init/corosync-notifyd.conf.in
+index b1ac70c..7364c2a 100644
+--- a/init/corosync-notifyd.conf.in
++++ b/init/corosync-notifyd.conf.in
+@@ -7,9 +7,9 @@ respawn
+ 
+ env prog=corosync-notifyd
+ env rpm_sysconf=@SYSCONFDIR@/sysconfig/corosync-notifyd
+-env rpm_lockfile=@LOCALSTATEDIR@/lock/subsys/corosync-notifyd
++env rpm_lockfile=@localstatedir@/lock/subsys/corosync-notifyd
+ env deb_sysconf=@SYSCONFDIR@/default/corosync-notifyd
+-env deb_lockfile=@LOCALSTATEDIR@/lock/corosync-notifyd
++env deb_lockfile=@localstatedir@/lock/corosync-notifyd
+ 
+ script
+     [ -f "$rpm_sysconf" ] && . $rpm_sysconf
+@@ -18,7 +18,7 @@ script
+ end script
+ 
+ pre-start script
+-    mkdir -p @LOCALSTATEDIR@/run
++    mkdir -p @localstatedir@/run
+ end script
+ 
+ post-start script
+diff --git a/init/corosync-notifyd.in b/init/corosync-notifyd.in
+index 4ec9674..f690f2a 100755
+--- a/init/corosync-notifyd.in
++++ b/init/corosync-notifyd.in
+@@ -51,13 +51,13 @@ status()
+ if [ -d @SYSCONFDIR@/sysconfig ]; then
+ 	[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
+ 	[ -f @SYSCONFDIR@/sysconfig/$prog ] && . @SYSCONFDIR@/sysconfig/$prog
+-	[ -z "$LOCK_FILE" ] && LOCK_FILE="@LOCALSTATEDIR@/lock/subsys/$prog"
++	[ -z "$LOCK_FILE" ] && LOCK_FILE="@localstatedir@/lock/subsys/$prog"
+ fi
+ 
+ # deb based distros
+ if [ -d @SYSCONFDIR@/default ]; then
+ 	[ -f @SYSCONFDIR@/default/$prog ] && . @SYSCONFDIR@/default/$prog
+-	[ -z "$LOCK_FILE" ] && LOCK_FILE="@LOCALSTATEDIR@/lock/$prog"
++	[ -z "$LOCK_FILE" ] && LOCK_FILE="@localstatedir@/lock/$prog"
+ fi
+ 
+ # The version of __pids_pidof in /etc/init.d/functions calls pidof with -x
+@@ -73,11 +73,11 @@ start()
+ {
+ 	echo -n "Starting $desc ($prog): "
+ 
+-	# most recent distributions use tmpfs for @LOCALSTATEDIR@/run
++	# most recent distributions use tmpfs for @localstatedir@/run
+ 	# to avoid to clean it up on every boot.
+ 	# they also assume that init scripts will create
+ 	# required subdirectories for proper operations
+-	mkdir -p @LOCALSTATEDIR@/run
++	mkdir -p @localstatedir@/run
+ 
+ 	if status $prog > /dev/null 2>&1; then
+ 		success
+diff --git a/init/corosync-qdevice.in b/init/corosync-qdevice.in
+index 336e95b..0d663a1 100755
+--- a/init/corosync-qdevice.in
++++ b/init/corosync-qdevice.in
+@@ -51,13 +51,13 @@ status()
+ if [ -d @SYSCONFDIR@/sysconfig ]; then
+ 	[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
+ 	[ -f @SYSCONFDIR@/sysconfig/$prog ] && . @SYSCONFDIR@/sysconfig/$prog
+-	[ -z "$LOCK_FILE" ] && LOCK_FILE="@LOCALSTATEDIR@/lock/subsys/$prog"
++	[ -z "$LOCK_FILE" ] && LOCK_FILE="@localstatedir@/lock/subsys/$prog"
+ fi
+ 
+ # deb based distros
+ if [ -d @SYSCONFDIR@/default ]; then
+ 	[ -f @SYSCONFDIR@/default/$prog ] && . @SYSCONFDIR@/default/$prog
+-	[ -z "$LOCK_FILE" ] && LOCK_FILE="@LOCALSTATEDIR@/lock/$prog"
++	[ -z "$LOCK_FILE" ] && LOCK_FILE="@localstatedir@/lock/$prog"
+ fi
+ 
+ # The version of __pids_pidof in /etc/init.d/functions calls pidof with -x
+@@ -86,13 +86,13 @@ start()
+ 
+ 	! cluster_disabled_at_boot && return
+ 
+-	# most recent distributions use tmpfs for @LOCALSTATEDIR@/run
++	# most recent distributions use tmpfs for @localstatedir@/run
+ 	# to avoid to clean it up on every boot.
+ 	# they also assume that init scripts will create
+ 	# required subdirectories for proper operations
+-	if [ ! -d "@LOCALSTATEDIR@/run/corosync-qdevice" ];then
+-		mkdir -p "@LOCALSTATEDIR@/run/corosync-qdevice"
+-		chmod 0770 "@LOCALSTATEDIR@/run/corosync-qdevice"
++	if [ ! -d "@localstatedir@/run/corosync-qdevice" ];then
++		mkdir -p "@localstatedir@/run/corosync-qdevice"
++		chmod 0770 "@localstatedir@/run/corosync-qdevice"
+ 	fi
+ 
+ 	if status $prog > /dev/null 2>&1; then
+diff --git a/init/corosync-qnetd.in b/init/corosync-qnetd.in
+index dc58776..6e76848 100755
+--- a/init/corosync-qnetd.in
++++ b/init/corosync-qnetd.in
+@@ -51,13 +51,13 @@ status()
+ if [ -d @SYSCONFDIR@/sysconfig ]; then
+ 	[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
+ 	[ -f @SYSCONFDIR@/sysconfig/$prog ] && . @SYSCONFDIR@/sysconfig/$prog
+-	[ -z "$LOCK_FILE" ] && LOCK_FILE="@LOCALSTATEDIR@/lock/subsys/$prog"
++	[ -z "$LOCK_FILE" ] && LOCK_FILE="@localstatedir@/lock/subsys/$prog"
+ fi
+ 
+ # deb based distros
+ if [ -d @SYSCONFDIR@/default ]; then
+ 	[ -f @SYSCONFDIR@/default/$prog ] && . @SYSCONFDIR@/default/$prog
+-	[ -z "$LOCK_FILE" ] && LOCK_FILE="@LOCALSTATEDIR@/lock/$prog"
++	[ -z "$LOCK_FILE" ] && LOCK_FILE="@localstatedir@/lock/$prog"
+ fi
+ 
+ # The version of __pids_pidof in /etc/init.d/functions calls pidof with -x
+@@ -86,15 +86,15 @@ start()
+ 
+ 	! cluster_disabled_at_boot && return
+ 
+-	# most recent distributions use tmpfs for @LOCALSTATEDIR@/run
++	# most recent distributions use tmpfs for @localstatedir@/run
+ 	# to avoid to clean it up on every boot.
+ 	# they also assume that init scripts will create
+ 	# required subdirectories for proper operations
+-	if [ ! -d "@LOCALSTATEDIR@/run/corosync-qnetd" ];then
+-		mkdir -p "@LOCALSTATEDIR@/run/corosync-qnetd"
+-		chmod 0770 "@LOCALSTATEDIR@/run/corosync-qnetd"
++	if [ ! -d "@localstatedir@/run/corosync-qnetd" ];then
++		mkdir -p "@localstatedir@/run/corosync-qnetd"
++		chmod 0770 "@localstatedir@/run/corosync-qnetd"
+ 		if [ ! -z "$COROSYNC_QNETD_RUNAS" ];then
+-			chown "$COROSYNC_QNETD_RUNAS:$COROSYNC_QNETD_RUNAS" "@LOCALSTATEDIR@/run/corosync-qnetd"
++			chown "$COROSYNC_QNETD_RUNAS:$COROSYNC_QNETD_RUNAS" "@localstatedir@/run/corosync-qnetd"
+ 		fi
+ 	fi
+ 
+diff --git a/init/corosync.conf.in b/init/corosync.conf.in
+index e5d7798..880ce37 100644
+--- a/init/corosync.conf.in
++++ b/init/corosync.conf.in
+@@ -6,9 +6,9 @@ expect fork
+ 
+ env prog=corosync
+ env rpm_sysconf=@SYSCONFDIR@/sysconfig/corosync
+-env rpm_lockfile=@LOCALSTATEDIR@/lock/subsys/corosync
++env rpm_lockfile=@localstatedir@/lock/subsys/corosync
+ env deb_sysconf=@SYSCONFDIR@/default/corosync
+-env deb_lockfile=@LOCALSTATEDIR@/lock/corosync
++env deb_lockfile=@localstatedir@/lock/corosync
+ 
+ script
+     [ -f "$rpm_sysconf" ] && . $rpm_sysconf
+@@ -17,7 +17,7 @@ script
+ end script
+ 
+ pre-start script
+-    mkdir -p @LOCALSTATEDIR@/run
++    mkdir -p @localstatedir@/run
+ end script
+ 
+ post-start script
+diff --git a/init/corosync.in b/init/corosync.in
+index d33db5f..8e58954 100755
+--- a/init/corosync.in
++++ b/init/corosync.in
+@@ -52,13 +52,13 @@ status()
+ if [ -d @SYSCONFDIR@/sysconfig ]; then
+ 	[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
+ 	[ -f @SYSCONFDIR@/sysconfig/$prog ] && . @SYSCONFDIR@/sysconfig/$prog
+-	[ -z "$LOCK_FILE" ] && LOCK_FILE="@LOCALSTATEDIR@/lock/subsys/$prog"
++	[ -z "$LOCK_FILE" ] && LOCK_FILE="@localstatedir@/lock/subsys/$prog"
+ fi
+ 
+ # deb based distros
+ if [ -d @SYSCONFDIR@/default ]; then
+ 	[ -f @SYSCONFDIR@/default/$prog ] && . @SYSCONFDIR@/default/$prog
+-	[ -z "$LOCK_FILE" ] && LOCK_FILE="@LOCALSTATEDIR@/lock/$prog"
++	[ -z "$LOCK_FILE" ] && LOCK_FILE="@localstatedir@/lock/$prog"
+ fi
+ 
+ # The version of __pids_pidof in /etc/init.d/functions calls pidof with -x
+@@ -104,11 +104,11 @@ start()
+ 
+ 	! cluster_disabled_at_boot && return
+ 
+-	# most recent distributions use tmpfs for @LOCALSTATEDIR@/run
++	# most recent distributions use tmpfs for @localstatedir@/run
+ 	# to avoid to clean it up on every boot.
+ 	# they also assume that init scripts will create
+ 	# required subdirectories for proper operations
+-	mkdir -p @LOCALSTATEDIR@/run
++	mkdir -p @localstatedir@/run
+ 
+ 	if status $prog > /dev/null 2>&1; then
+ 		success

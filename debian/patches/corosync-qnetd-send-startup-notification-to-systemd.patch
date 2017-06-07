@@ -1,0 +1,63 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Mon, 19 Dec 2016 14:27:08 +0100
+Subject: corosync-qnetd: send startup notification to systemd
+
+---
+ init/corosync-qnetd.service.in | 2 +-
+ qdevices/Makefile.am           | 4 ++--
+ qdevices/corosync-qnetd.c      | 7 +++++++
+ 3 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/init/corosync-qnetd.service.in b/init/corosync-qnetd.service.in
+index 7e550d2..807bd65 100644
+--- a/init/corosync-qnetd.service.in
++++ b/init/corosync-qnetd.service.in
+@@ -8,7 +8,7 @@ After=network-online.target
+ [Service]
+ EnvironmentFile=-@CONFIGDIR@/corosync-qnetd
+ ExecStart=@bindir_expanded@/corosync-qnetd -f $COROSYNC_QNETD_OPTIONS
+-Type=simple
++Type=notify
+ Restart=on-abnormal
+ User=coroqnetd
+ RuntimeDirectory=corosync-qnetd
+diff --git a/qdevices/Makefile.am b/qdevices/Makefile.am
+index 45bc176..1aeaa69 100644
+--- a/qdevices/Makefile.am
++++ b/qdevices/Makefile.am
+@@ -75,8 +75,8 @@ corosync_qnetd_SOURCES	= corosync-qnetd.c \
+ corosync_qnetd_tool_SOURCES = corosync-qnetd-tool.c unix-socket.c unix-socket.h dynar.c dynar.h \
+                               dynar-str.c dynar-str.h
+ 
+-corosync_qnetd_CFLAGS		= $(nss_CFLAGS)
+-corosync_qnetd_LDADD		= $(nss_LIBS)
++corosync_qnetd_CFLAGS		= $(nss_CFLAGS) $(libsystemd_CFLAGS)
++corosync_qnetd_LDADD		= $(nss_LIBS)   $(libsystemd_LIBS)
+ 
+ corosync-qnetd-certutil: corosync-qnetd-certutil.sh
+ 	sed -e 's#@''DATADIR@#${datadir}#g' \
+diff --git a/qdevices/corosync-qnetd.c b/qdevices/corosync-qnetd.c
+index c6b8b0d..86e80dd 100644
+--- a/qdevices/corosync-qnetd.c
++++ b/qdevices/corosync-qnetd.c
+@@ -38,6 +38,10 @@
+ #include <signal.h>
+ #include <unistd.h>
+ 
++#ifdef HAVE_LIBSYSTEMD
++#include <systemd/sd-daemon.h>
++#endif
++
+ #include "qnet-config.h"
+ 
+ #include "dynar.h"
+@@ -613,6 +617,9 @@ main(int argc, char * const argv[])
+ 	}
+ 
+ 	qnetd_log(LOG_DEBUG, "QNetd ready to provide service");
++#ifdef HAVE_LIBSYSTEMD
++	sd_notify (0, "READY=1");
++#endif
+ 	/*
+ 	 * MAIN LOOP
+ 	 */

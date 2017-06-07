@@ -5,7 +5,7 @@ Maintainer: Debian HA Maintainers <debian-ha-maintainers@lists.alioth.debian.org
 Uploaders: Christoph Berg <myon@debian.org>,
  Richard B Winters <rik@mmogp.com>,
  Adrian Vondendriesch <adrian.vondendriesch@credativ.de>,
- Ferenc Wágner <wferi@niif.hu>
+ Ferenc Wágner <wferi@debian.org>,
 Standards-Version: 3.9.8
 Build-Depends: debhelper (>= 9),
  dctrl-tools,
@@ -71,11 +71,35 @@ Depends: ${misc:Depends},
  libquorum5 (= ${binary:Version}),
  libsam4 (= ${binary:Version}),
  libtotem-pg5 (= ${binary:Version}),
- libvotequorum7 (= ${binary:Version})
+ libvotequorum8 (= ${binary:Version})
 Description: cluster engine debugging symbols
  ${DESCRIPTION}
  This package contains debug information for the Corosync daemons, utilities
  and libraries.
+
+Package: corosync-qdevice
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ corosync (= ${binary:Version}),
+ libnss3-tools,
+Description: cluster engine quorum device daemon
+ ${DESCRIPTION}
+ This package contains the quorum device daemon and utilities.
+
+Package: corosync-qnetd
+Architecture: any
+Depends:
+ adduser,
+ libnss3-tools,
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: cluster engine quorum device network daemon
+ ${DESCRIPTION}
+ This package contains the quorum device network daemon running outside
+ of clusters with the purpose of providing votes to the corosync-qdevice
+ model "net", and some utilities for it.
 
 Package: corosync-doc
 Section: doc
@@ -181,7 +205,7 @@ Description: cluster engine Totem library
  ${DESCRIPTION}
  This package contains the Totem library.
 
-Package: libvotequorum7
+Package: libvotequorum8
 Section: libs
 Architecture: any
 Multi-Arch: same
@@ -302,7 +326,7 @@ Architecture: any
 Multi-Arch: same
 Depends: ${misc:Depends},
  ${header:Depends},
- libvotequorum7 (= ${binary:Version})
+ libvotequorum8 (= ${binary:Version})
 # Moved from corosync: /usr/share/man/man8/votequorum_overview.8.gz
 #        corosync-dev: /usr/share/man/man3/votequorum_fd_get.3.gz etc.
 Replaces:

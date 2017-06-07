@@ -1,0 +1,21 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Sun, 30 Oct 2016 13:33:40 +0100
+Subject: Fix typo: Destorying -> Destroying
+
+---
+ qdevices/corosync-qdevice.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/qdevices/corosync-qdevice.c b/qdevices/corosync-qdevice.c
+index 9916c69..525d81c 100644
+--- a/qdevices/corosync-qdevice.c
++++ b/qdevices/corosync-qdevice.c
+@@ -246,7 +246,7 @@ main(int argc, char * const argv[])
+ 		return (1);
+ 	}
+ 
+-	qdevice_log(LOG_DEBUG, "Destorying qdevice model");
++	qdevice_log(LOG_DEBUG, "Destroying qdevice model");
+ 	qdevice_model_destroy(&instance);
+ 
+ 	qdevice_ipc_destroy(&instance);

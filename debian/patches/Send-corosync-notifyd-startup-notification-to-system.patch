@@ -13,23 +13,23 @@ Signed-off-by: Ferenc Wágner <wferi@niif.hu>
  3 files changed, 11 insertions(+), 2 deletions(-)
 
 diff --git a/init/corosync-notifyd.service.in b/init/corosync-notifyd.service.in
-index 94c03c3..15d6da4 100644
+index 63e1a33..ce08aaa 100644
 --- a/init/corosync-notifyd.service.in
 +++ b/init/corosync-notifyd.service.in
 @@ -7,7 +7,7 @@ After=corosync.service
- EnvironmentFile=-@SYSCONFDIR@/sysconfig/corosync-notifyd
- EnvironmentFile=-@SYSCONFDIR@/default/corosync-notifyd
- ExecStart=@SBINDIR@/corosync-notifyd -f $OPTIONS
+ [Service]
+ EnvironmentFile=-@CONFIGDIR@/corosync-notifyd
+ ExecStart=@sbindir_expanded@/corosync-notifyd -f $OPTIONS
 -Type=simple
 +Type=notify
  Restart=always
  
  [Install]
 diff --git a/tools/Makefile.am b/tools/Makefile.am
-index 4eb801a..9e67456 100644
+index 6079f8d..c698fee 100644
 --- a/tools/Makefile.am
 +++ b/tools/Makefile.am
-@@ -67,8 +67,9 @@ corosync_quorumtool_LDADD = $(LIBQB_LIBS) \
+@@ -58,8 +58,9 @@ corosync_quorumtool_LDADD = $(LIBQB_LIBS) \
  			    $(top_builddir)/lib/libquorum.la \
  			    $(top_builddir)/lib/libvotequorum.la
  

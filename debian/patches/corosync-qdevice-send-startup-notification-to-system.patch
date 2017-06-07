@@ -1,0 +1,64 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Mon, 19 Dec 2016 14:34:02 +0100
+Subject: corosync-qdevice: send startup notification to systemd
+
+---
+ init/corosync-qdevice.service.in | 2 +-
+ qdevices/Makefile.am             | 5 +++--
+ qdevices/corosync-qdevice.c      | 7 +++++++
+ 3 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/init/corosync-qdevice.service.in b/init/corosync-qdevice.service.in
+index 33104a3..39583d9 100644
+--- a/init/corosync-qdevice.service.in
++++ b/init/corosync-qdevice.service.in
+@@ -8,7 +8,7 @@ After=corosync.service
+ [Service]
+ EnvironmentFile=-@CONFIGDIR@/corosync-qdevice
+ ExecStart=@sbindir_expanded@/corosync-qdevice -f $COROSYNC_QDEVICE_OPTIONS
+-Type=simple
++Type=notify
+ Restart=on-abnormal
+ RuntimeDirectory=corosync-qdevice
+ # Don't rely on the socket persmissions (man 7 unix)
+diff --git a/qdevices/Makefile.am b/qdevices/Makefile.am
+index 1aeaa69..d267447 100644
+--- a/qdevices/Makefile.am
++++ b/qdevices/Makefile.am
+@@ -129,8 +129,9 @@ corosync_qdevice_SOURCES = corosync-qdevice.c \
+ corosync_qdevice_tool_SOURCES = corosync-qdevice-tool.c unix-socket.c unix-socket.h dynar.c dynar.h \
+                                 dynar-str.c dynar-str.h
+ 
+-corosync_qdevice_CFLAGS	= $(nss_CFLAGS)
+-corosync_qdevice_LDADD	= $(nss_LIBS) $(LIBQB_LIBS) $(top_builddir)/lib/libcmap.la \
++corosync_qdevice_CFLAGS	= $(nss_CFLAGS) $(libsystemd_CFLAGS)
++corosync_qdevice_LDADD	= $(nss_LIBS)   $(libsystemd_LIBS) $(LIBQB_LIBS) \
++                          $(top_builddir)/lib/libcmap.la \
+                           $(top_builddir)/lib/libvotequorum.la
+ 
+ corosync-qdevice-net-certutil: corosync-qdevice-net-certutil.sh
+diff --git a/qdevices/corosync-qdevice.c b/qdevices/corosync-qdevice.c
+index 525d81c..794f53c 100644
+--- a/qdevices/corosync-qdevice.c
++++ b/qdevices/corosync-qdevice.c
+@@ -35,6 +35,10 @@
+ #include <err.h>
+ #include <signal.h>
+ 
++#ifdef HAVE_LIBSYSTEMD
++#include <systemd/sd-daemon.h>
++#endif
++
+ #include "dynar.h"
+ #include "dynar-str.h"
+ #include "dynar-getopt-lex.h"
+@@ -237,6 +241,9 @@ main(int argc, char * const argv[])
+ 	signal_handlers_register();
+ 
+ 	qdevice_log(LOG_DEBUG, "Running qdevice model");
++#ifdef HAVE_LIBSYSTEMD
++	sd_notify (0, "READY=1");
++#endif
+ 	if (qdevice_model_run(&instance) != 0) {
+ 		return (1);
+ 	}

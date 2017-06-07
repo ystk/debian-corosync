@@ -1,0 +1,43 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Mon, 28 Nov 2016 13:31:36 +0100
+Subject: Fully expand substituted variables
+
+---
+ configure.ac | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index f32c164..e9c7d09 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -733,15 +733,26 @@ if test "$ap_cv_cc_as_needed" = "yes"; then
+   LDFLAGS="$LDFLAGS -Wl,--as-needed"
+ fi
+ 
++expand() {
++    local s1 s2
++    s1=""
++    s2="$*"
++    while test "$s1" != "$s2"; do
++        s1="$s2"
++        s2=$(eval "echo $s1")
++    done
++    echo "$s2"
++}
++
+ # substitute what we need:
+-AC_SUBST([bindir_expanded],[$(eval "echo $bindir")])
+-AC_SUBST([sbindir_expanded],[$(eval "echo $sbindir")])
+-AC_SUBST([datadir_expanded],[$(eval "echo $datadir")])
++AC_SUBST([bindir_expanded],[$(expand $bindir)])
++AC_SUBST([sbindir_expanded],[$(expand $sbindir)])
++AC_SUBST([datadir_expanded],[$(expand $datadir)])
+ AC_SUBST([BASHPATH])
+ AC_SUBST([INITDDIR])
+ AC_SUBST([SYSTEMDDIR])
+ AC_SUBST([UPSTARTDIR])
+-INITWRAPPERSDIR=$(eval echo ${INITWRAPPERSDIR})
++INITWRAPPERSDIR=$(expand $INITWRAPPERSDIR)
+ AC_SUBST([INITWRAPPERSDIR])
+ AC_SUBST([LOGDIR])
+ AC_SUBST([LOGROTATEDIR])

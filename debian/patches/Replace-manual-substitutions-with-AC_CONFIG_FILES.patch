@@ -1,0 +1,281 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Fri, 25 Nov 2016 10:18:14 +0100
+Subject: Replace manual substitutions with AC_CONFIG_FILES
+
+---
+ configure.ac                     | 14 +++++++++++++-
+ init/Makefile.am                 | 28 +++-------------------------
+ init/corosync-notifyd.in         |  2 +-
+ init/corosync-notifyd.service.in |  2 +-
+ init/corosync-qdevice.in         |  2 +-
+ init/corosync-qnetd.in           |  2 +-
+ init/corosync-qnetd.service.in   |  2 +-
+ init/corosync.in                 |  2 +-
+ pkgconfig/Makefile.am            | 29 ++++-------------------------
+ pkgconfig/corosync.pc.in         | 10 +++++-----
+ pkgconfig/libtemplate.pc.in      | 16 ++++++++--------
+ 11 files changed, 39 insertions(+), 70 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index 73597ca..f457f04 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -192,10 +192,14 @@ AC_CONFIG_FILES([Makefile
+ 		 exec/Makefile
+ 		 include/Makefile
+ 		 init/Makefile
++		 init/corosync.conf
++		 init/corosync-notifyd.conf
+ 		 lib/Makefile
+ 		 common_lib/Makefile
+ 		 man/Makefile
+ 		 pkgconfig/Makefile
++		 pkgconfig/corosync.pc
++		 pkgconfig/libtemplate.pc
+ 		 test/Makefile
+ 		 cts/Makefile
+ 		 cts/agents/Makefile
+@@ -209,6 +213,10 @@ AC_CONFIG_FILES([Makefile
+ 		 conf/logrotate/Makefile
+ 		 conf/tmpfiles.d/Makefile])
+ 
++for daemon in corosync corosync-notifyd corosync-qdevice corosync-qnetd; do
++    AC_CONFIG_FILES([init/$daemon init/$daemon.service])
++done
++
+ ### Local business
+ 
+ dnl ===============================================
+@@ -707,6 +715,8 @@ if test "$ap_cv_cc_as_needed" = "yes"; then
+ fi
+ 
+ # substitute what we need:
++AC_SUBST([bindir_expanded],[$(eval "echo $bindir")])
++AC_SUBST([sbindir_expanded],[$(eval "echo $sbindir")])
+ AC_SUBST([BASHPATH])
+ AC_SUBST([INITDDIR])
+ AC_SUBST([SYSTEMDDIR])
+@@ -732,7 +742,9 @@ AM_CONDITIONAL(BUILD_HTML_DOCS, test -n "${GROFF}")
+ 
+ AC_SUBST([LINT_FLAGS])
+ 
+-AC_DEFINE_UNQUOTED([LOCALSTATEDIR], "$(eval echo ${localstatedir})", [localstate directory])
++# We need the expanded value in substitutions, too
++LOCALSTATEDIR="$(eval echo ${localstatedir})"
++AC_DEFINE_UNQUOTED([LOCALSTATEDIR],["$LOCALSTATEDIR"],[localstate directory])
+ 
+ COROSYSCONFDIR=${sysconfdir}/corosync
+ AC_SUBST([COROSYSCONFDIR])
+diff --git a/init/Makefile.am b/init/Makefile.am
+index 379249f..ea715c2 100644
+--- a/init/Makefile.am
++++ b/init/Makefile.am
+@@ -34,13 +34,9 @@
+ 
+ MAINTAINERCLEANFILES	= Makefile.in
+ 
+-EXTRA_DIST		= corosync.in corosync-notifyd.in corosync.service.in \
+-                          corosync-notifyd.service.in corosync.conf.in corosync-notifyd.conf.in \
+-                          corosync.sysconfig.example \
+-                          corosync-qdevice.sysconfig.example corosync-qdevice.in \
+-                          corosync-qdevice.service.in \
+-                          corosync-qnetd.sysconfig.example corosync-qnetd.in \
+-                          corosync-qnetd.service.in
++EXTRA_DIST		= corosync.sysconfig.example \
++                          corosync-qdevice.sysconfig.example \
++                          corosync-qnetd.sysconfig.example
+ 
+ if INSTALL_SYSTEMD
+ systemdconfdir	   = $(SYSTEMDDIR)
+@@ -69,21 +65,3 @@ if INSTALL_UPSTART
+ upstartconfdir     = $(UPSTARTDIR)
+ upstartconf_DATA   = corosync.conf corosync-notifyd.conf
+ endif
+-
+-%: %.in Makefile
+-	rm -f $@-t $@
+-	cat $< | sed \
+-		-e 's#@''SBINDIR@#$(sbindir)#g' \
+-		-e 's#@''BINDIR@#$(bindir)#g' \
+-		-e 's#@''SYSCONFDIR@#$(sysconfdir)#g' \
+-		-e 's#@''INITDDIR@#$(INITDDIR)#g' \
+-		-e 's#@''INITWRAPPERSDIR@#$(INITWRAPPERSDIR)#g' \
+-		-e 's#@''LOCALSTATEDIR@#$(localstatedir)#g' \
+-		-e 's#@''BASHPATH@#${BASHPATH}#g' \
+-	    > $@-t
+-	mv $@-t $@
+-
+-all-local: $(initscript_SCRIPTS) $(systemdconf_DATA) $(upstartconf_DATA)
+-
+-clean-local:
+-	rm -rf $(initscript_SCRIPTS) $(systemdconf_DATA) $(upstartconf_DATA)
+diff --git a/init/corosync-notifyd.in b/init/corosync-notifyd.in
+index 3711821..4ec9674 100755
+--- a/init/corosync-notifyd.in
++++ b/init/corosync-notifyd.in
+@@ -23,7 +23,7 @@ desc="Corosync Notifier"
+ prog="corosync-notifyd"
+ 
+ # set secure PATH
+-PATH="/sbin:/bin:/usr/sbin:/usr/bin:@SBINDIR@"
++PATH="/sbin:/bin:/usr/sbin:/usr/bin:@sbindir_expanded@"
+ 
+ success()
+ {
+diff --git a/init/corosync-notifyd.service.in b/init/corosync-notifyd.service.in
+index 689ab8e..9ec4bb9 100644
+--- a/init/corosync-notifyd.service.in
++++ b/init/corosync-notifyd.service.in
+@@ -6,7 +6,7 @@ After=corosync.service
+ 
+ [Service]
+ EnvironmentFile=@SYSCONFDIR@/sysconfig/corosync-notifyd
+-ExecStart=@SBINDIR@/corosync-notifyd -f $OPTIONS
++ExecStart=@sbindir_expanded@/corosync-notifyd -f $OPTIONS
+ Type=simple
+ Restart=on-failure
+ 
+diff --git a/init/corosync-qdevice.in b/init/corosync-qdevice.in
+index 913e033..336e95b 100755
+--- a/init/corosync-qdevice.in
++++ b/init/corosync-qdevice.in
+@@ -23,7 +23,7 @@ desc="Corosync Qdevice daemon"
+ prog="corosync-qdevice"
+ 
+ # set secure PATH
+-PATH="/sbin:/bin:/usr/sbin:/usr/bin:@SBINDIR@"
++PATH="/sbin:/bin:/usr/sbin:/usr/bin:@sbindir_expanded@"
+ 
+ success()
+ {
+diff --git a/init/corosync-qnetd.in b/init/corosync-qnetd.in
+index 15d30ea..dc58776 100755
+--- a/init/corosync-qnetd.in
++++ b/init/corosync-qnetd.in
+@@ -23,7 +23,7 @@ desc="Corosync Qdevice Network daemon"
+ prog="corosync-qnetd"
+ 
+ # set secure PATH
+-PATH="/sbin:/bin:/usr/sbin:/usr/bin:@SBINDIR@"
++PATH="/sbin:/bin:/usr/sbin:/usr/bin:@sbindir_expanded@"
+ 
+ success()
+ {
+diff --git a/init/corosync-qnetd.service.in b/init/corosync-qnetd.service.in
+index c6cf8c9..f279ac2 100644
+--- a/init/corosync-qnetd.service.in
++++ b/init/corosync-qnetd.service.in
+@@ -7,7 +7,7 @@ After=network-online.target
+ 
+ [Service]
+ EnvironmentFile=@SYSCONFDIR@/sysconfig/corosync-qnetd
+-ExecStart=@BINDIR@/corosync-qnetd -f $COROSYNC_QNETD_OPTIONS
++ExecStart=@bindir_expanded@/corosync-qnetd -f $COROSYNC_QNETD_OPTIONS
+ Type=simple
+ Restart=on-abnormal
+ # Uncomment and set user who should be used for executing qnetd
+diff --git a/init/corosync.in b/init/corosync.in
+index c93f971..d33db5f 100755
+--- a/init/corosync.in
++++ b/init/corosync.in
+@@ -24,7 +24,7 @@ desc="Corosync Cluster Engine"
+ prog="corosync"
+ 
+ # set secure PATH
+-PATH="/sbin:/bin:/usr/sbin:/usr/bin:@SBINDIR@"
++PATH="/sbin:/bin:/usr/sbin:/usr/bin:@sbindir_expanded@"
+ 
+ success()
+ {
+diff --git a/pkgconfig/Makefile.am b/pkgconfig/Makefile.am
+index db73df3..90bee36 100644
+--- a/pkgconfig/Makefile.am
++++ b/pkgconfig/Makefile.am
+@@ -30,8 +30,6 @@
+ 
+ MAINTAINERCLEANFILES	= Makefile.in
+ 
+-EXTRA_DIST		= libtemplate.pc.in corosync.pc.in
+-
+ LIBS	= cfg cpg quorum \
+ 	  totem_pg votequorum sam cmap corosync_common
+ 
+@@ -39,30 +37,11 @@ pkgconfigdir = $(libdir)/pkgconfig
+ 
+ target_LIBS = $(LIBS:%=lib%.pc)
+ 
+-target_PACKAGE = corosync.pc
+-
+-pkgconfig_DATA = $(target_LIBS) $(target_PACKAGE)
+-
+-CLEANFILES = $(pkgconfig_DATA)
++pkgconfig_DATA = $(target_LIBS) corosync.pc
+ 
+-lib%.pc: libtemplate.pc.in Makefile
+-	rm -f $@-t $@
+-	sed \
+-		-e 's#@''PREFIX@#$(exec_prefix)#g' \
+-		-e 's#@''LIBDIR@#$(libdir)#g' \
+-		-e 's#@''LIBVERSION@#$(VERSION)#g' \
+-		-e 's#@''LIB@#'$(*:lib%=%)'#g' \
+-	    $< > $@-t
+-	chmod a-w $@-t
+-	mv $@-t $@
++CLEANFILES = $(target_LIBS)
+ 
+-%: %.in Makefile
++lib%.pc: libtemplate.pc
+ 	rm -f $@-t $@
+-	sed \
+-		-e 's#@''PREFIX@#$(exec_prefix)#g' \
+-		-e 's#@''LIBDIR@#$(libdir)#g' \
+-		-e 's#@''LIBVERSION@#$(VERSION)#g' \
+-	    $< > $@-t
+-	chmod a-w $@-t
++	sed -e 's/@-@/$*/g' $< > $@-t
+ 	mv $@-t $@
+-
+diff --git a/pkgconfig/corosync.pc.in b/pkgconfig/corosync.pc.in
+index 031aac9..12bbe7e 100644
+--- a/pkgconfig/corosync.pc.in
++++ b/pkgconfig/corosync.pc.in
+@@ -1,10 +1,10 @@
+-prefix=@PREFIX@
+-exec_prefix=${prefix}
+-libdir=@LIBDIR@
+-includedir=${prefix}/include
++prefix=@prefix@
++exec_prefix=@exec_prefix@
++libdir=@libdir@
++includedir=@includedir@
+ 
+ Name: corosync
+-Version: @LIBVERSION@
++Version: @VERSION@
+ Description: corosync
+ Requires: libqb
+ Cflags: -I${includedir}
+diff --git a/pkgconfig/libtemplate.pc.in b/pkgconfig/libtemplate.pc.in
+index 4a8a7e0..47cf703 100644
+--- a/pkgconfig/libtemplate.pc.in
++++ b/pkgconfig/libtemplate.pc.in
+@@ -1,11 +1,11 @@
+-prefix=@PREFIX@
+-exec_prefix=${prefix}
+-libdir=@LIBDIR@
+-includedir=${prefix}/include
++prefix=@prefix@
++exec_prefix=@exec_prefix@
++libdir=@libdir@
++includedir=@includedir@
+ 
+-Name: @LIB@
+-Version: @LIBVERSION@
+-Description: @LIB@
++Name: @-@
++Version: @VERSION@
++Description: @-@
+ Requires:
+-Libs: -L${libdir} -l@LIB@
++Libs: -L${libdir} -l@-@
+ Cflags: -I${includedir}

@@ -1,0 +1,35 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Sun, 30 Oct 2016 13:32:57 +0100
+Subject: Fix typo: occours -> occurs
+
+---
+ ChangeLog        | 2 +-
+ man/votequorum.5 | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/ChangeLog b/ChangeLog
+index 6040451..58877f4 100644
+--- a/ChangeLog
++++ b/ChangeLog
+@@ -5320,7 +5320,7 @@
+ 
+ 2012-02-07  Fabio M. Di Nitto  <fdinitto@redhat.com>
+ 
+-	votequorum: fix quorum_ringid setting before any delivery occours
++	votequorum: fix quorum_ringid setting before any delivery occurs
+ 	Reviewed-by: Christine Caulfield <ccaulfie@redhat.com>
+ 
+ 2012-02-07  Angus Salkeld  <asalkeld@redhat.com>
+diff --git a/man/votequorum.5 b/man/votequorum.5
+index ee4814a..fd9590e 100644
+--- a/man/votequorum.5
++++ b/man/votequorum.5
+@@ -223,7 +223,7 @@ Example chain of events:
+ .PP
+ NOTES: In order for the cluster to downgrade automatically from 2 nodes
+ to a 1 node cluster, the auto_tie_breaker feature must also be enabled (see below).
+-If auto_tie_breaker is not enabled, and one more failure occours, the
++If auto_tie_breaker is not enabled, and one more failure occurs, the
+ remaining node will not be quorate. LMS does not work with asymmetric voting
+ schemes, each node must vote 1. LMS is also incompatible with quorum devices,
+ if last_man_standing is specified in corosync.conf then the quorum device 

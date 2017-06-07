@@ -1,0 +1,26 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Tue, 8 Nov 2016 22:36:53 +0100
+Subject: Start corosync-qdevice directly
+
+---
+ init/corosync-qdevice.service.in | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/init/corosync-qdevice.service.in b/init/corosync-qdevice.service.in
+index 8de4e5b..001cb75 100644
+--- a/init/corosync-qdevice.service.in
++++ b/init/corosync-qdevice.service.in
+@@ -6,9 +6,10 @@ Wants=corosync.service
+ After=corosync.service
+ 
+ [Service]
+-ExecStart=@INITWRAPPERSDIR@/corosync-qdevice start
+-ExecStop=@INITWRAPPERSDIR@/corosync-qdevice stop
+-Type=forking
++EnvironmentFile=-@CONFIGDIR@/corosync-qdevice
++ExecStart=@sbindir_expanded@/corosync-qdevice -f $COROSYNC_QDEVICE_OPTIONS
++Type=simple
++Restart=on-abnormal
+ 
+ [Install]
+ WantedBy=multi-user.target

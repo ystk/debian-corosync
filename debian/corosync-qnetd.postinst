@@ -1,0 +1,21 @@
+#!/bin/sh
+
+set -e
+
+dir=/etc/corosync/qnetd
+user=coroqnetd
+
+if [ "$1" = configure ]; then
+    adduser --system --group --quiet --home "$dir" \
+        --no-create-home --disabled-login "$user"
+
+    if ! [ -f "$dir/nssdb/cert8.db" ]; then
+        corosync-qnetd-certutil -i
+    fi
+
+    # Upstream default is too permissive
+    chmod -R g-w "$dir/nssdb"
+    chgrp "$user" "$dir/nssdb" "$dir/nssdb/cert8.db" "$dir/nssdb/key3.db"
+fi
+
+#DEBHELPER#

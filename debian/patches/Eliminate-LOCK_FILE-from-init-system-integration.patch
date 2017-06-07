@@ -1,0 +1,222 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Fri, 25 Nov 2016 11:21:00 +0100
+Subject: Eliminate LOCK_FILE from init system integration
+
+I don't see any reason for locking the respecive subsystems.  I'm pretty
+certain Debian derivatives don't even notice, and RedHat seems to provide
+nothing but a cryptic status message if some daemon leaves behind such a
+lockfile.
+---
+ init/corosync-notifyd.conf.in | 16 ----------------
+ init/corosync-notifyd.in      | 11 ++---------
+ init/corosync-qdevice.in      | 11 ++---------
+ init/corosync-qnetd.in        | 11 ++---------
+ init/corosync.conf.in         | 14 --------------
+ init/corosync.in              | 11 ++---------
+ 6 files changed, 8 insertions(+), 66 deletions(-)
+
+diff --git a/init/corosync-notifyd.conf.in b/init/corosync-notifyd.conf.in
+index 708bd46..3745abd 100644
+--- a/init/corosync-notifyd.conf.in
++++ b/init/corosync-notifyd.conf.in
+@@ -7,8 +7,6 @@ respawn
+ 
+ env prog=corosync-notifyd
+ env sysconf=@CONFIGDIR@/corosync-notifyd
+-env rpm_lockfile=@localstatedir@/lock/subsys/corosync-notifyd
+-env deb_lockfile=@localstatedir@/lock/corosync-notifyd
+ 
+ script
+     [ -f "$sysconf" ] && . $sysconf
+@@ -18,17 +16,3 @@ end script
+ pre-start script
+     mkdir -p @localstatedir@/run
+ end script
+-
+-post-start script
+-    [ -f "$sysconf" ] && . $sysconf
+-    [ -z "$LOCK_FILE" -a -d @SYSCONFDIR@/sysconfig ] && LOCK_FILE="$rpm_lockfile"
+-    [ -z "$LOCK_FILE" -a -d @SYSCONFDIR@/default ] && LOCK_FILE="$deb_lockfile"
+-    touch $LOCK_FILE
+-end script
+-
+-post-stop script
+-    [ -f "$sysconf" ] && . $sysconf
+-    [ -z "$LOCK_FILE" -a -d @SYSCONFDIR@/sysconfig ] && LOCK_FILE="$rpm_lockfile"
+-    [ -z "$LOCK_FILE" -a -d @SYSCONFDIR@/default ] && LOCK_FILE="$deb_lockfile"
+-    rm -f $LOCK_FILE
+-end script
+diff --git a/init/corosync-notifyd.in b/init/corosync-notifyd.in
+index 6311d60..cde1d4a 100755
+--- a/init/corosync-notifyd.in
++++ b/init/corosync-notifyd.in
+@@ -47,13 +47,8 @@ status()
+ 	return $rtrn
+ }
+ 
+-# rpm based distros
+-if [ -d @SYSCONFDIR@/sysconfig ]; then
+-	[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
+-	LOCK_FILE="@localstatedir@/lock/subsys/$prog"
+-else
+-	LOCK_FILE="@localstatedir@/lock/$prog"
+-fi
++[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
++
+ [ -f @CONFIGDIR@/$prog ] && . @CONFIGDIR@/$prog
+ 
+ # The version of __pids_pidof in /etc/init.d/functions calls pidof with -x
+@@ -83,7 +78,6 @@ start()
+ 		# give it time to fail
+ 		sleep 2
+ 		if status $prog > /dev/null 2>&1; then
+-			touch $LOCK_FILE
+ 			success
+ 		else
+ 			failure
+@@ -108,7 +102,6 @@ stop()
+ 		echo -n "."
+ 	done
+ 
+-	rm -f $LOCK_FILE
+ 	success
+ 	echo
+ }
+diff --git a/init/corosync-qdevice.in b/init/corosync-qdevice.in
+index 1d7fcae..07eca17 100755
+--- a/init/corosync-qdevice.in
++++ b/init/corosync-qdevice.in
+@@ -47,13 +47,8 @@ status()
+ 	return $res
+ }
+ 
+-# rpm based distros
+-if [ -d @SYSCONFDIR@/sysconfig ]; then
+-	[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
+-	LOCK_FILE="@localstatedir@/lock/subsys/$prog"
+-else
+-	LOCK_FILE="@localstatedir@/lock/$prog"
+-fi
++[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
++
+ [ -f @CONFIGDIR@/$prog ] && . @CONFIGDIR@/$prog
+ 
+ # The version of __pids_pidof in /etc/init.d/functions calls pidof with -x
+@@ -100,7 +95,6 @@ start()
+ 			failure
+ 			rtrn=1
+ 		else
+-			touch $LOCK_FILE
+ 			success
+ 		fi
+ 	fi
+@@ -122,7 +116,6 @@ stop()
+ 		echo -n "."
+ 	done
+ 
+-	rm -f $LOCK_FILE
+ 	success
+ 	echo
+ }
+diff --git a/init/corosync-qnetd.in b/init/corosync-qnetd.in
+index 689decc..db31d69 100755
+--- a/init/corosync-qnetd.in
++++ b/init/corosync-qnetd.in
+@@ -47,13 +47,8 @@ status()
+ 	return $res
+ }
+ 
+-# rpm based distros
+-if [ -d @SYSCONFDIR@/sysconfig ]; then
+-	[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
+-	LOCK_FILE="@localstatedir@/lock/subsys/$prog"
+-else
+-	LOCK_FILE="@localstatedir@/lock/$prog"
+-fi
++[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
++
+ [ -f @CONFIGDIR@/$prog ] && . @CONFIGDIR@/$prog
+ 
+ # The version of __pids_pidof in /etc/init.d/functions calls pidof with -x
+@@ -107,7 +102,6 @@ start()
+ 			failure
+ 			rtrn=1
+ 		else
+-			touch $LOCK_FILE
+ 			success
+ 		fi
+ 	fi
+@@ -129,7 +123,6 @@ stop()
+ 		echo -n "."
+ 	done
+ 
+-	rm -f $LOCK_FILE
+ 	success
+ 	echo
+ }
+diff --git a/init/corosync.conf.in b/init/corosync.conf.in
+index cb7b65a..6f1b7c0 100644
+--- a/init/corosync.conf.in
++++ b/init/corosync.conf.in
+@@ -6,8 +6,6 @@ expect fork
+ 
+ env prog=corosync
+ env sysconf=@CONFIGDIR@/corosync
+-env rpm_lockfile=@localstatedir@/lock/subsys/corosync
+-env deb_lockfile=@localstatedir@/lock/corosync
+ 
+ script
+     [ -f "$sysconf" ] && . $sysconf
+@@ -37,16 +35,4 @@ wait_for_ipc()
+     return 1
+ }
+     wait_for_ipc || { stop; exit 1; }
+-
+-    [ -f "$sysconf" ] && . $sysconf
+-    [ -z "$LOCK_FILE" -a -d @SYSCONFDIR@/sysconfig ] && LOCK_FILE="$rpm_lockfile"
+-    [ -z "$LOCK_FILE" -a -d @SYSCONFDIR@/default ] && LOCK_FILE="$deb_lockfile"
+-    touch $LOCK_FILE
+-end script
+-
+-post-stop script
+-    [ -f "$sysconf" ] && . $sysconf
+-    [ -z "$LOCK_FILE" -a -d @SYSCONFDIR@/sysconfig ] && LOCK_FILE="$rpm_lockfile"
+-    [ -z "$LOCK_FILE" -a -d @SYSCONFDIR@/default ] && LOCK_FILE="$deb_lockfile"
+-    rm -f $LOCK_FILE
+ end script
+diff --git a/init/corosync.in b/init/corosync.in
+index 9178059..af792e5 100755
+--- a/init/corosync.in
++++ b/init/corosync.in
+@@ -48,13 +48,8 @@ status()
+ 	return $res
+ }
+ 
+-# rpm based distros
+-if [ -d @SYSCONFDIR@/sysconfig ]; then
+-	[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
+-	LOCK_FILE="@localstatedir@/lock/subsys/$prog"
+-else
+-	LOCK_FILE="@localstatedir@/lock/$prog"
+-fi
++[ -f @INITDDIR@/functions ] && . @INITDDIR@/functions
++
+ [ -f @CONFIGDIR@/$prog ] && . @CONFIGDIR@/$prog
+ 
+ # The version of __pids_pidof in /etc/init.d/functions calls pidof with -x
+@@ -115,7 +110,6 @@ start()
+ 			failure
+ 			rtrn=1
+ 		else
+-			touch $LOCK_FILE
+ 			success
+ 		fi
+ 	fi
+@@ -137,7 +131,6 @@ stop()
+ 		echo -n "."
+ 	done
+ 
+-	rm -f $LOCK_FILE
+ 	success
+ 	echo
+ }

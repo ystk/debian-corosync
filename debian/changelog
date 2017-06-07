@@ -1,3 +1,57 @@
+corosync (2.4.2-3~bpo8+1) jessie-backports; urgency=medium
+
+  * Rebuild for jessie-backports.
+
+ -- Christoph Berg <christoph.berg@credativ.de>  Wed, 07 Jun 2017 11:22:16 +0200
+
+corosync (2.4.2-3) unstable; urgency=medium
+
+  [ Ferenc Wágner ]
+  * [c1663f3] Extend systemd notification to corosync-qdevice and corosync-qnetd
+
+ -- Ferenc Wágner <wferi@debian.org>  Mon, 19 Dec 2016 14:35:43 +0100
+
+corosync (2.4.2-2) unstable; urgency=medium
+
+  * [5996a94] Don't enable the qdevice daemon on installation, it needs
+    configuration
+  * [058daab] autopkgtest: corosync is started automatically
+  * [c4bd5cf] Reorder and rework patch queue for easier upstreaming
+  * [ec61daa] Use RuntimeDirectory instead of tmpfiles.d
+
+ -- Ferenc Wágner <wferi@debian.org>  Mon, 19 Dec 2016 09:48:37 +0100
+
+corosync (2.4.2-1) unstable; urgency=medium
+
+  * [ed34965] Use official distribution site in the watch file
+  * [d541754] New upstream release (2.4.1)
+  * [717a4f7] Delete upstreamed patches, refresh the rest
+  * [b6f41ad] New package: corosync-qdevice
+  * [1f7ee1d] New package: corosync-qnetd
+  * [c92036e] Add Documentation URIs to the new services as well
+  * [5a467de] New patches fixing typos
+  * [86efc5b] Add corosync-qdevice init script and default file
+  * [0b15d12] Migrate to my Debian address
+  * [e1afcd2] Add 3 patches fixing typos
+  * [c28efd0] New patch Don-t-try-to-load-a-sysconfig-file.patch
+  * [22f8fa2] Create system user and TLS cert when corosync-qnetd is installed
+  * [3419d64] New patch Run-corosync-qnetd-unprivileged.patch
+  * [06fbae0] New upstream release (2.4.2)
+  * [aaf208d] Refresh our patches
+  * [b5244cd] corosync-qdevice is too long for init-d-script
+  * [ed3e629] Add corosync-qnetd init script
+  * [1aae25d] Bump SO version of the libvotequorum package
+  * [80f82ab] corosync-qnetd is in /usr/bin
+  * [9c4a7d1] Ship a default file for corosync-qnetd
+  * [3e29b17] New patch Start-corosync-qdevice-directly.patch
+  * [5f7698b] New patch Use-the-default-files-from-the-service-files.patch
+  * [9fb0165] Revert "The package name is superfluous in the debian release tag
+    titles" (commit 32635c4).
+    While superfluous, it does not warrant an extra configuration line.
+  * [07a150c] Switch gbp dch to verbose changelog entries
+
+ -- Ferenc Wágner <wferi@debian.org>  Wed, 09 Nov 2016 22:04:50 +0100
+
 corosync (2.3.6-3~bpo8+1) jessie-backports; urgency=medium
 
   * Rebuild for jessie-backports.

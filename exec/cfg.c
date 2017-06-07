@@ -521,8 +521,8 @@ static void message_handler_req_exec_cfg_killnode (
 	cs_name_t reason;
 
 	ENTER();
-	log_printf(LOGSYS_LEVEL_DEBUG, "request to kill node %d(us=%d): %s",
-		req_exec_cfg_killnode->nodeid, api->totem_nodeid_get(), reason.value);
+	log_printf(LOGSYS_LEVEL_DEBUG, "request to kill node %d(us=%d)",
+		req_exec_cfg_killnode->nodeid, api->totem_nodeid_get());
         if (req_exec_cfg_killnode->nodeid == api->totem_nodeid_get()) {
 		marshall_from_mar_name_t(&reason, &req_exec_cfg_killnode->reason);
 		log_printf(LOGSYS_LEVEL_NOTICE, "Killed by node %d: %s",
@@ -703,7 +703,7 @@ static void message_handler_req_exec_cfg_reload_config (
 	remove_deleted_entries(temp_map, "totem.");
 	remove_deleted_entries(temp_map, "nodelist.");
 	remove_deleted_entries(temp_map, "quorum.");
-	remove_deleted_entries(temp_map, "uidgid.");
+	remove_deleted_entries(temp_map, "uidgid.config.");
 
 	/* Remove entries that cannot be changed */
 	remove_ro_entries(temp_map);

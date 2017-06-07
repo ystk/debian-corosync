@@ -1,0 +1,83 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Mon, 28 Nov 2016 11:46:54 +0100
+Subject: Replace manual substitutions in the tools directory as well
+
+---
+ configure.ac               |  3 +++
+ tools/Makefile.am          | 16 ++--------------
+ tools/corosync-blackbox.sh |  2 +-
+ tools/corosync-xmlproc.sh  |  2 +-
+ 4 files changed, 7 insertions(+), 16 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index f457f04..92fbcc4 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -205,6 +205,8 @@ AC_CONFIG_FILES([Makefile
+ 		 cts/agents/Makefile
+ 		 cts/CTSvars.py
+ 		 tools/Makefile
++		 tools/corosync-xmlproc:tools/corosync-xmlproc.sh
++		 tools/corosync-blackbox:tools/corosync-blackbox.sh
+ 		 conf/Makefile
+ 		 qdevices/Makefile
+ 		 Doxyfile
+@@ -717,6 +719,7 @@ fi
+ # substitute what we need:
+ AC_SUBST([bindir_expanded],[$(eval "echo $bindir")])
+ AC_SUBST([sbindir_expanded],[$(eval "echo $sbindir")])
++AC_SUBST([datadir_expanded],[$(eval "echo $datadir")])
+ AC_SUBST([BASHPATH])
+ AC_SUBST([INITDDIR])
+ AC_SUBST([SYSTEMDDIR])
+diff --git a/tools/Makefile.am b/tools/Makefile.am
+index 4eb801a..6079f8d 100644
+--- a/tools/Makefile.am
++++ b/tools/Makefile.am
+@@ -42,17 +42,8 @@ if INSTALL_XMLCONF
+ bin_SCRIPTS		+= corosync-xmlproc
+ endif
+ 
+-EXTRA_DIST		= $(bin_SCRIPTS) corosync-xmlproc.sh \
+-			  corosync-notifyd.sysconfig.example \
+-                          corosync-blackbox.sh
+-
+-corosync-xmlproc: corosync-xmlproc.sh
+-	sed -e 's#@''DATADIR@#${datadir}#g' \
+-	    -e 's#@''BASHPATH@#${BASHPATH}#g' \
+-	    $< > $@
+-
+-corosync-blackbox: corosync-blackbox.sh
+-	sed -e 's#@''LOCALSTATEDIR@#${localstatedir}#g' $< > $@
++EXTRA_DIST		= $(bin_SCRIPTS) \
++			  corosync-notifyd.sysconfig.example
+ 
+ corosync_cmapctl_LDADD	= $(LIBQB_LIBS) $(top_builddir)/lib/libcmap.la
+ 
+@@ -75,6 +66,3 @@ corosync_notifyd_LDADD    = $(LIBQB_LIBS) $(DBUS_LIBS) $(SNMP_LIBS) \
+ 
+ lint:
+ 	-splint $(LINT_FLAGS) $(DBUS_CFLAGS) $(CPPFLAGS) $(CFLAGS) *.c
+-
+-clean-local:
+-	rm -f corosync-xmlproc corosync-blackbox
+diff --git a/tools/corosync-blackbox.sh b/tools/corosync-blackbox.sh
+index fb5ce96..7a07aed 100644
+--- a/tools/corosync-blackbox.sh
++++ b/tools/corosync-blackbox.sh
+@@ -31,4 +31,4 @@
+ 
+ corosync-cmapctl -s runtime.blackbox.dump_state str $(date +%s)
+ corosync-cmapctl -s runtime.blackbox.dump_flight_data str $(date +%s)
+-qb-blackbox "@LOCALSTATEDIR@/lib/corosync/fdata"
++qb-blackbox "@localstatedir@/lib/corosync/fdata"
+diff --git a/tools/corosync-xmlproc.sh b/tools/corosync-xmlproc.sh
+index c098958..d8c9724 100644
+--- a/tools/corosync-xmlproc.sh
++++ b/tools/corosync-xmlproc.sh
+@@ -54,4 +54,4 @@ fi
+ 
+ [ "$2" != "" ] && out_param="-o $2"
+ 
+-$XSLT_PROC --stringparam inputfile "$1" $out_param @DATADIR@/corosync/xml2conf.xsl "$1"
++$XSLT_PROC --stringparam inputfile "$1" $out_param @datadir_expanded@/corosync/xml2conf.xsl "$1"

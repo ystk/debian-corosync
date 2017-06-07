@@ -15,20 +15,20 @@ Signed-off-by: Ferenc Wágner <wferi@niif.hu>
  1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/init/corosync-notifyd.service.in b/init/corosync-notifyd.service.in
-index ba08b87..94c03c3 100644
+index 1edcee4..63e1a33 100644
 --- a/init/corosync-notifyd.service.in
 +++ b/init/corosync-notifyd.service.in
-@@ -1,6 +1,6 @@
+@@ -1,14 +1,14 @@
  [Unit]
  Description=Corosync Dbus and snmp notifier
+ Documentation=man:corosync-notifyd
 -Wants=corosync.service
 +Requires=corosync.service
  After=corosync.service
  
  [Service]
-@@ -8,7 +8,7 @@ EnvironmentFile=-@SYSCONFDIR@/sysconfig/corosync-notifyd
- EnvironmentFile=-@SYSCONFDIR@/default/corosync-notifyd
- ExecStart=@SBINDIR@/corosync-notifyd -f $OPTIONS
+ EnvironmentFile=-@CONFIGDIR@/corosync-notifyd
+ ExecStart=@sbindir_expanded@/corosync-notifyd -f $OPTIONS
  Type=simple
 -Restart=on-failure
 +Restart=always

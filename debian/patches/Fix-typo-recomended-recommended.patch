@@ -1,0 +1,21 @@
+From: =?utf-8?q?Ferenc_W=C3=A1gner?= <wferi@debian.org>
+Date: Sun, 30 Oct 2016 13:32:02 +0100
+Subject: Fix typo: recomended -> recommended
+
+---
+ man/corosync.conf.5 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/man/corosync.conf.5 b/man/corosync.conf.5
+index 00a7a38..851574d 100644
+--- a/man/corosync.conf.5
++++ b/man/corosync.conf.5
+@@ -193,7 +193,7 @@ cycles in corosync.
+ 
+ The default is on.
+ 
+-WARNING: This parameter is deprecated. It's recomended to use combination of
++WARNING: This parameter is deprecated. It's recommended to use combination of
+ crypto_cipher and crypto_hash.
+ 
+ .TP
