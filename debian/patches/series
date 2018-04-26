@@ -27,3 +27,8 @@ Fully-expand-substituted-variables.patch
 Use-RuntimeDirectory-instead-of-tmpfiles.d.patch
 corosync-qnetd-send-startup-notification-to-systemd.patch
 corosync-qdevice-send-startup-notification-to-system.patch
+totemcrypto-Check-length-of-the-packet.patch
+totemsrp-Implement-sanity-checks-of-received-msgs.patch
+totemsrp-Check-join-and-leave-msg-length.patch
+totemudp-Check-lenght-of-message-to-sent.patch
+qdevice-msgio-Fix-reading-of-msg-longer-than-i32.patch

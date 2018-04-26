@@ -1,3 +1,37 @@
+corosync (2.4.2-3+deb9u1~bpo8+1) jessie-backports; urgency=high
+
+  * Rebuild for jessie-backports.
+  * [e44e00f] --restart-after-upgrade instead of stop in prerm and start in
+    postinst.
+    The previous stable security upgrade resulted in user complaints about
+    Pacemaker remaining stopped after the Corosync upgrade.  This is what
+    systemd does with dependent services on stop+start.  We can afford doing
+    a restart instead, which behaves more like users expect.
+    WARNING: on this upgrade the old prerm will still stop Corosync (and
+    consequently: its dependencies!) for one last time.  Pure restart
+    behavior becomes effective for the forthcoming upgrades only.
+    (Closes: #887563)
+
+ -- Ferenc Wágner <wferi@debian.org>  Tue, 24 Apr 2018 12:06:51 +0200
+
+corosync (2.4.2-3+deb9u1) stretch-security; urgency=high
+
+  * [c2ee7ce] New patch fixing CVE-2018-1084: integer overflow in
+    exec/totemcrypto.c.
+    An integer overflow leading to an out-of-bound read was found in
+    authenticate_nss_2_3() in Corosync. An attacker could craft a malicious
+    packet that would lead to a denial of service.
+    https://bugzilla.redhat.com/show_bug.cgi?id=CVE-2018-1084
+    Thanks to Jan Friesse
+  * [cfd0189] New patches fixing other vulnerabilities similar to CVE-2018-1084.
+    The msgio patch fixes a real problem when message length > 2^31, which
+    can't be mitigated by enabling encryption of the Corosync traffic.
+    The other patches fix buffer overflows resulting in stack corruption
+    and uses of unallocated memory; these can be mitigated by encryption.
+  * [2ce17dc] The security patches introduced a new symbol
+
+ -- Ferenc Wágner <wferi@debian.org>  Fri, 13 Apr 2018 14:37:35 +0200
+
 corosync (2.4.2-3~bpo8+1) jessie-backports; urgency=medium
 
   * Rebuild for jessie-backports.

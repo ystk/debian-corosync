@@ -82,6 +82,9 @@ override_dh_install:
 override_dh_installchangelogs:
 	dh_installchangelogs ChangeLog
 
+override_dh_installinit:
+	dh_installinit --restart-after-upgrade
+
 override_dh_systemd_enable:
 	dh_systemd_enable -p corosync-qdevice --no-enable
 	dh_systemd_enable --remaining-packages

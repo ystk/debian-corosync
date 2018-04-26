@@ -11,6 +11,7 @@ libtotem_pg.so.5 libtotem-pg5 #MINVER#
  cipher_to_nss@Base 1.99.9
  crypto_authenticate_and_decrypt@Base 1.99.9
  crypto_encrypt_and_sign@Base 1.99.9
+ crypto_get_current_sec_header_size@Base 2.4.2-3+deb9u1~
  crypto_init@Base 1.99.9
  crypto_sec_header_size@Base 1.99.9
  cypher_block_len@Base 1.99.9

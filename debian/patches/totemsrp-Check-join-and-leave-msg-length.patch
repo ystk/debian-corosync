@@ -1,0 +1,75 @@
+From: Jan Friesse <jfriesse@redhat.com>
+Date: Fri, 23 Mar 2018 16:27:53 +0100
+Subject: totemsrp: Check join and leave msg length
+
+If number of proc_list, failed_list or active members is too high it
+may be impossible to put them into message, which is allocated on the
+stack what results in stack corruption.
+
+Signed-off-by: Jan Friesse <jfriesse@redhat.com>
+Reviewed-by: Christine Caulfield <ccaulfie@redhat.com>
+---
+ exec/totemsrp.c | 22 +++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/exec/totemsrp.c b/exec/totemsrp.c
+index fd88088..4be2d66 100644
+--- a/exec/totemsrp.c
++++ b/exec/totemsrp.c
+@@ -3309,6 +3309,7 @@ static void memb_join_message_send (struct totemsrp_instance *instance)
+ 	struct memb_join *memb_join = (struct memb_join *)memb_join_data;
+ 	char *addr;
+ 	unsigned int addr_idx;
++	size_t msg_len;
+ 
+ 	memb_join->header.type = MESSAGE_TYPE_MEMB_JOIN;
+ 	memb_join->header.endian_detector = ENDIAN_LOCAL;
+@@ -3316,6 +3317,16 @@ static void memb_join_message_send (struct totemsrp_instance *instance)
+ 	memb_join->header.nodeid = instance->my_id.addr[0].nodeid;
+ 	assert (memb_join->header.nodeid);
+ 
++	msg_len = sizeof(struct memb_join) +
++	    ((instance->my_proc_list_entries + instance->my_failed_list_entries) * sizeof(struct srp_addr));
++
++	if (msg_len > sizeof(memb_join_data)) {
++		log_printf (instance->totemsrp_log_level_error,
++			"memb_join_message too long. Ignoring message.");
++
++		return ;
++	}
++
+ 	memb_join->ring_seq = instance->my_ring_id.seq;
+ 	memb_join->proc_list_entries = instance->my_proc_list_entries;
+ 	memb_join->failed_list_entries = instance->my_failed_list_entries;
+@@ -3342,7 +3353,6 @@ static void memb_join_message_send (struct totemsrp_instance *instance)
+ 		instance->my_failed_list_entries *
+ 		sizeof (struct srp_addr);
+ 
+-
+ 	if (instance->totem_config->send_join_timeout) {
+ 		usleep (random() % (instance->totem_config->send_join_timeout * 1000));
+ 	}
+@@ -3363,6 +3373,7 @@ static void memb_leave_message_send (struct totemsrp_instance *instance)
+ 	unsigned int addr_idx;
+ 	int active_memb_entries;
+ 	struct srp_addr active_memb[PROCESSOR_COUNT_MAX];
++	size_t msg_len;
+ 
+ 	log_printf (instance->totemsrp_log_level_debug,
+ 		"sending join/leave message");
+@@ -3379,6 +3390,15 @@ static void memb_leave_message_send (struct totemsrp_instance *instance)
+ 			   instance->my_proc_list, instance->my_proc_list_entries,
+ 			   &instance->my_id, 1);
+ 
++	msg_len = sizeof(struct memb_join) +
++	    ((active_memb_entries + instance->my_failed_list_entries) * sizeof(struct srp_addr));
++
++	if (msg_len > sizeof(memb_join_data)) {
++		log_printf (instance->totemsrp_log_level_error,
++			"memb_leave message too long. Ignoring message.");
++
++		return ;
++	}
+ 
+ 	memb_join->header.type = MESSAGE_TYPE_MEMB_JOIN;
+ 	memb_join->header.endian_detector = ENDIAN_LOCAL;
